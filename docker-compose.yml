@@ -1,0 +1,192 @@
+code version: '3.8'
+
+# Must run the following commands before running docker compose up.
+#     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard.localhost.key   -out certs/wildcard.localhost.crt   -subj "/CN=*.localhost"   -addext "subjectAltName=DNS:*.localhost,DNS:localhost"
+#     $ docker volume create nextcloud_aio_mastercontainer
+#     $ docker network create --subnet=172.20.0.0/24 --driver=bridge familynet
+
+services:
+
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    command:
+      - --api.dashboard=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./certs:/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth"
+      - "traefik.http.middlewares.auth.forwardauth.address=http://auth:4181"
+      - "traefik.http.middlewares.auth.forwardauth.trustforwardheader=true"
+      - "traefik.http.middlewares.auth.forwardauth.authresponseheaders=X-Forwarded-User"
+    networks:
+      familynet:
+        ipv4_address: 172.20.0.10
+    dns:
+      - 172.20.0.11
+
+  auth:
+    image: thomseddon/traefik-forward-auth
+    container_name: auth
+    environment:
+      - DEFAULT_PROVIDER=oidc
+      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.localhost/realms/traefik
+      - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
+      - PROVIDERS_OIDC_CLIENT_SECRET=secret123
+      - SECRET=supersecretcookie
+      - COOKIE_DOMAIN=auth.localhost
+      - AUTH_HOST=auth.localhost
+      - LOG_LEVEL=debug
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=Host(`auth.localhost`)"
+      - "traefik.http.routers.auth.entrypoints=websecure"
+      - "traefik.http.routers.auth.tls=true"
+      - "traefik.http.services.auth.loadbalancer.server.port=4181"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    volumes:
+      - ./certs/wildcard.localhost.crt:/etc/ssl/certs/wildcard.localhost.crt:ro
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+    
+  ldap:
+    image: lldap/lldap:latest
+    container_name: ldap
+    environment:
+      - LLDAP_JWT_SECRET=supersecretjwtkeychangeit
+      - LLDAP_LDAP_BASE_DN=dc=example,dc=com
+      - LLDAP_LDAP_USER_DN=ou=people,dc=example,dc=com
+      - LLDAP_LDAP_USER_PASS=adminpasswordchangeit
+    volumes:
+      - lldap_data:/data
+    ports:
+      - "3890:3890"
+      - "17170:17170"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ldap.rule=Host(`ldap.localhost`)"
+      - "traefik.http.routers.ldap.entrypoints=websecure"
+      - "traefik.http.routers.ldap.tls=true"
+      - "traefik.http.services.ldap.loadbalancer.server.port=17170"
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  coredns:
+    image: coredns/coredns:latest
+    container_name: coredns
+    volumes:
+      - ./Corefile:/Corefile:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    restart: unless-stopped
+    networks:
+      familynet:
+        ipv4_address: 172.20.0.11
+    dns:
+      - 172.20.0.11
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: keycloak
+    command: start-dev
+    depends_on:
+      ldap:
+        condition: service_healthy
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=adminpasswordchangeit
+      - KC_HOSTNAME=keycloak.localhost
+      - KC_HTTP_ENABLED=true
+      - KC_PROXY=edge
+      - KC_HOSTNAME_STRICT=false
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./keycloak-config.sh:/opt/keycloak/keycloak-config.sh:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`keycloak.localhost`)"
+      - "traefik.http.routers.keycloak.entrypoints=websecure"
+      - "traefik.http.routers.keycloak.tls=true"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+    entrypoint: >
+      bash -c "
+        /opt/keycloak/bin/kc.sh start-dev &
+        until echo > /dev/tcp/localhost/8080 2>/dev/null; do echo 'Waiting for Keycloak...'; sleep 2; done;
+
+        if [ ! -f /opt/keycloak/data/.configured ]; then
+          echo 'Running initial Keycloak configuration...'
+          bash /opt/keycloak/keycloak-config.sh && touch /opt/keycloak/data/.configured
+        else
+          echo 'Keycloak has already been configured. Skipping config.'
+        fi
+
+        wait"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo > /dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+services:
+  nextcloud-aio-mastercontainer:
+    image: nextcloud/all-in-one:latest
+    container_name: nextcloud
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - nextcloud_aio_mastercontainer:/mnt/docker-aio-config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - NEXTCLOUD_DATADIR=/mnt/ncdata
+      - NEXTCLOUD_ADMIN_PASSWORD=adminpasswordchangeit
+      - NEXTCLOUD_ADMIN_USER=admin
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.rule=Host(`nextcloud.localhost`)"
+      - "traefik.http.routers.nextcloud.entrypoints=websecure"
+      - "traefik.http.routers.nextcloud.tls=true"
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=8080"
+    networks:
+      familynet:
+        ipv4_address: 172.20.0.12
+    dns:
+      - 172.20.0.11
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+volumes:
+  lldap_data:
+  keycloak_data:
+
+networks:
+  familynet:
+    external: true

@@ -1,0 +1,4 @@
+tls:
+  certificates:
+    - certFile: /certs/wildcard.localhost.crt
+      keyFile: /certs/wildcard.localhost.key
