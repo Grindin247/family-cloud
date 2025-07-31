@@ -14,3 +14,6 @@ providers:
 
 api:
   dashboard: true
+
+serversTransport:
+  insecureSkipVerify: true

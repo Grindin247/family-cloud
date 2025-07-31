@@ -1,18 +1,16 @@
 . {
     hosts {
-    172.20.0.10 traefik.localhost
-    172.20.0.10 auth.localhost
-    172.20.0.10 keycloak.localhost
-    172.20.0.10 ldap.localhost
-    172.20.0.10 nextcloud.localhost
+    192.168.1.27 traefik.callender434.fam
+    192.168.1.27 auth.callender434.fam
+    192.168.1.27 keycloak.callender434.fam
+    192.168.1.27 ldap.callender434.fam
+    192.168.1.27 nextcloud.callender434.fam
+	192.168.1.27 nextcloudsetup.callender434.fam
     fallthrough
-  }
+	}
 
-    forward . /etc/resolv.conf 1.1.1.1 8.8.8.8 {
-        policy sequential
-    }
-
-  cache 300
-  log
-  errors
+    forward . 192.168.1.1
+	cache 300
+	log
+	errors
 }

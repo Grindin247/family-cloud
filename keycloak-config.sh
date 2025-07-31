@@ -22,7 +22,7 @@ done
   -s enabled=true \
   -s clientAuthenticatorType=client-secret \
   -s secret=secret123 \
-  -s redirectUris='["https://auth.localhost/_oauth/*"]' \
+  -s redirectUris='["https://auth.callender434.fam/_oauth/*"]' \
   -s standardFlowEnabled=true \
   -s serviceAccountsEnabled=true || true
 
@@ -57,5 +57,5 @@ REALM_ID=$(/opt/keycloak/bin/kcadm.sh get realms/familycloud --fields id --forma
     "usersDn": ["ou=people,dc=example,dc=com"],
     "bindDn": ["uid=admin,ou=people,dc=example,dc=com"],
     "bindCredential": ["adminpasswordchangeit"],
-    "searchScope": ["Subtree"]
+    "searchScope": ["2"]
   }' || true

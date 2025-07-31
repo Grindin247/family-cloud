@@ -1,4 +1,25 @@
+http:
+  routers:
+    nextcloud:
+      rule: "Host(`nextcloud.callender434.fam`)"
+      entryPoints:
+        - websecure
+      service: nextcloud
+      tls: true
+
+  services:
+    nextcloud:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:11000"
+        passHostHeader: true
+        serversTransport: "insecure-transport"
+
+  serversTransports:
+    insecure-transport:
+      insecureSkipVerify: true
+
 tls:
   certificates:
-    - certFile: /certs/wildcard.localhost.crt
-      keyFile: /certs/wildcard.localhost.key
+    - certFile: /certs/wildcard.callender434.fam.crt
+      keyFile: /certs/wildcard.callender434.fam.key

@@ -1,9 +1,12 @@
-code version: '3.8'
+version: '3.8'
 
 # Must run the following commands before running docker compose up.
-#     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard.localhost.key   -out certs/wildcard.localhost.crt   -subj "/CN=*.localhost"   -addext "subjectAltName=DNS:*.localhost,DNS:localhost"
+#     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard.callender434.fam.key   -out certs/wildcard.callender434.fam.crt   -subj "/CN=*.callender434.fam"   -addext "subjectAltName=DNS:*.callender434.fam,DNS:family"
 #     $ docker volume create nextcloud_aio_mastercontainer
 #     $ docker network create --subnet=172.20.0.0/24 --driver=bridge familynet
+#
+# If using WSL2 set the fallback DNS to the window host gateway IP address in the Corefile.
+# Update router DNS settings to point to the WSL2 host IP.
 
 services:
 
@@ -17,6 +20,7 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.filename=/etc/traefik/dynamic.yml
       - --providers.file.watch=true
     ports:
       - "80:80"
@@ -28,7 +32,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.callender434.fam`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.tls=true"
       - "traefik.http.routers.traefik.service=api@internal"
@@ -47,16 +51,16 @@ services:
     container_name: auth
     environment:
       - DEFAULT_PROVIDER=oidc
-      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.localhost/realms/traefik
+      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.callender434.fam/realms/familycloud
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
       - PROVIDERS_OIDC_CLIENT_SECRET=secret123
       - SECRET=supersecretcookie
-      - COOKIE_DOMAIN=auth.localhost
-      - AUTH_HOST=auth.localhost
+      - COOKIE_DOMAIN=auth.callender434.fam
+      - AUTH_HOST=auth.callender434.fam
       - LOG_LEVEL=debug
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.auth.rule=Host(`auth.localhost`)"
+      - "traefik.http.routers.auth.rule=Host(`auth.callender434.fam`)"
       - "traefik.http.routers.auth.entrypoints=websecure"
       - "traefik.http.routers.auth.tls=true"
       - "traefik.http.services.auth.loadbalancer.server.port=4181"
@@ -64,7 +68,7 @@ services:
       keycloak:
         condition: service_healthy
     volumes:
-      - ./certs/wildcard.localhost.crt:/etc/ssl/certs/wildcard.localhost.crt:ro
+      - ./certs/wildcard.callender434.fam.crt:/etc/ssl/certs/wildcard.callender434.fam.crt:ro
     networks:
       - familynet
     dns:
@@ -76,7 +80,6 @@ services:
     environment:
       - LLDAP_JWT_SECRET=supersecretjwtkeychangeit
       - LLDAP_LDAP_BASE_DN=dc=example,dc=com
-      - LLDAP_LDAP_USER_DN=ou=people,dc=example,dc=com
       - LLDAP_LDAP_USER_PASS=adminpasswordchangeit
     volumes:
       - lldap_data:/data
@@ -85,7 +88,7 @@ services:
       - "17170:17170"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ldap.rule=Host(`ldap.localhost`)"
+      - "traefik.http.routers.ldap.rule=Host(`ldap.callender434.fam`)"
       - "traefik.http.routers.ldap.entrypoints=websecure"
       - "traefik.http.routers.ldap.tls=true"
       - "traefik.http.services.ldap.loadbalancer.server.port=17170"
@@ -97,6 +100,8 @@ services:
   coredns:
     image: coredns/coredns:latest
     container_name: coredns
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./Corefile:/Corefile:ro
     ports:
@@ -119,7 +124,7 @@ services:
     environment:
       - KEYCLOAK_ADMIN=admin
       - KEYCLOAK_ADMIN_PASSWORD=adminpasswordchangeit
-      - KC_HOSTNAME=keycloak.localhost
+      - KC_HOSTNAME=keycloak.callender434.fam
       - KC_HTTP_ENABLED=true
       - KC_PROXY=edge
       - KC_HOSTNAME_STRICT=false
@@ -128,7 +133,7 @@ services:
       - ./keycloak-config.sh:/opt/keycloak/keycloak-config.sh:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.keycloak.rule=Host(`keycloak.localhost`)"
+      - "traefik.http.routers.keycloak.rule=Host(`keycloak.callender434.fam`)"
       - "traefik.http.routers.keycloak.entrypoints=websecure"
       - "traefik.http.routers.keycloak.tls=true"
       - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
@@ -155,10 +160,10 @@ services:
     dns:
       - 172.20.0.11
 
-services:
   nextcloud-aio-mastercontainer:
     image: nextcloud/all-in-one:latest
-    container_name: nextcloud
+    # Nextcloud container name name must be nextcloud_aio_mastercontainer
+    container_name: nextcloud-aio-mastercontainer
     restart: unless-stopped
     privileged: true
     volumes:
@@ -168,12 +173,20 @@ services:
       - NEXTCLOUD_DATADIR=/mnt/ncdata
       - NEXTCLOUD_ADMIN_PASSWORD=adminpasswordchangeit
       - NEXTCLOUD_ADMIN_USER=admin
+      - APACHE_PORT=11000
+      - APACHE_IP_BINDING=0.0.0.0
+      - APACHE_ADDITIONAL_NETWORK=familynet
+      - SKIP_DOMAIN_VALIDATION=true
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.callender434.fam
+      - NEXTCLOUD_WOPI_SKIP_SSL_VERIFY=true
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.nextcloud.rule=Host(`nextcloud.localhost`)"
-      - "traefik.http.routers.nextcloud.entrypoints=websecure"
-      - "traefik.http.routers.nextcloud.tls=true"
-      - "traefik.http.services.nextcloud.loadbalancer.server.port=8080"
+      - "traefik.http.routers.nextcloudsetup.rule=Host(`nextcloudsetup.callender434.fam`)"
+      - "traefik.http.routers.nextcloudsetup.entrypoints=websecure"
+      - "traefik.http.routers.nextcloudsetup.tls=true"
+      - "traefik.http.routers.nextcloudsetup.service=nextcloudsetup"
+      - "traefik.http.services.nextcloudsetup.loadbalancer.server.port=8080"
+      - "traefik.http.services.nextcloudsetup.loadbalancer.server.scheme=https"
     networks:
       familynet:
         ipv4_address: 172.20.0.12
@@ -186,6 +199,9 @@ services:
 volumes:
   lldap_data:
   keycloak_data:
+  # Nextcloud volume name must match the one used in the Nextcloud AIO container.
+  nextcloud_aio_mastercontainer:
+    external: true
 
 networks:
   familynet:
