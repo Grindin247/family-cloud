@@ -32,7 +32,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(`traefik.`)"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.tls=true"
       - "traefik.http.routers.traefik.service=api@internal"
@@ -51,16 +51,16 @@ services:
     container_name: auth
     environment:
       - DEFAULT_PROVIDER=oidc
-      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak./realms/familycloud
+      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
-      - PROVIDERS_OIDC_CLIENT_SECRET=
-      - SECRET=
-      - COOKIE_DOMAIN=auth.
-      - AUTH_HOST=auth.
+      - PROVIDERS_OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - SECRET=${FORWARD_AUTH_COOKIE_SECRET}
+      - COOKIE_DOMAIN=.${FAMILY_DOMAIN}
+      - AUTH_HOST=auth.${FAMILY_DOMAIN}
       - LOG_LEVEL=debug
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.auth.rule=Host(`auth.`)"
+      - "traefik.http.routers.auth.rule=Host(`auth.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.auth.entrypoints=websecure"
       - "traefik.http.routers.auth.tls=true"
       - "traefik.http.services.auth.loadbalancer.server.port=4181"
@@ -68,7 +68,7 @@ services:
       keycloak:
         condition: service_healthy
     volumes:
-      - ./certs/wildcard..crt:/etc/ssl/certs/wildcard..crt:ro
+      - ./certs/wildcard.${FAMILY_DOMAIN}.crt:/etc/ssl/certs/wildcard.${FAMILY_DOMAIN}.crt:ro
     networks:
       - familynet
     dns:
@@ -78,9 +78,9 @@ services:
     image: lldap/lldap:latest
     container_name: ldap
     environment:
-      - LLDAP_JWT_SECRET=supersecretjwtkeychangeit
+      - LLDAP_JWT_SECRET=${LLDAP_JWT_SECRET}
       - LLDAP_LDAP_BASE_DN=dc=example,dc=com
-      - LLDAP_LDAP_USER_PASS=
+      - LLDAP_LDAP_USER_PASS=${LLDAP_ADMIN_PASSWORD}
     volumes:
       - lldap_data:/data
     ports:
@@ -88,7 +88,7 @@ services:
       - "17170:17170"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ldap.rule=Host(`ldap.`)"
+      - "traefik.http.routers.ldap.rule=Host(`ldap.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.ldap.entrypoints=websecure"
       - "traefik.http.routers.ldap.tls=true"
       - "traefik.http.services.ldap.loadbalancer.server.port=17170"
@@ -123,8 +123,8 @@ services:
         condition: service_healthy
     environment:
       - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=
-      - KC_HOSTNAME=keycloak.
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+      - KC_HOSTNAME=keycloak.${FAMILY_DOMAIN}
       - KC_HTTP_ENABLED=true
       - KC_PROXY=edge
       - KC_HOSTNAME_STRICT=false
@@ -133,7 +133,7 @@ services:
       - ./keycloak-config.sh:/opt/keycloak/keycloak-config.sh:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.keycloak.rule=Host(`keycloak.`)"
+      - "traefik.http.routers.keycloak.rule=Host(`keycloak.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.keycloak.entrypoints=websecure"
       - "traefik.http.routers.keycloak.tls=true"
       - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
@@ -171,17 +171,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - NEXTCLOUD_DATADIR=/mnt/ncdata
-      - NEXTCLOUD_ADMIN_PASSWORD=
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
       - NEXTCLOUD_ADMIN_USER=admin
       - APACHE_PORT=11000
       - APACHE_IP_BINDING=0.0.0.0
       - APACHE_ADDITIONAL_NETWORK=familynet
       - SKIP_DOMAIN_VALIDATION=true
-      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.${FAMILY_DOMAIN}
       - NEXTCLOUD_WOPI_SKIP_SSL_VERIFY=true
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.nextcloudsetup.rule=Host(`nextcloudsetup.`)"
+      - "traefik.http.routers.nextcloudsetup.rule=Host(`nextcloudsetup.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.nextcloudsetup.entrypoints=websecure"
       - "traefik.http.routers.nextcloudsetup.tls=true"
       - "traefik.http.routers.nextcloudsetup.service=nextcloudsetup"
@@ -196,9 +196,78 @@ services:
       keycloak:
         condition: service_healthy
 
+  # --- Agent task tracking (Kanban) ---
+  # Vikunja: https://vikunja.io
+  # Enable with: docker compose --profile ops up -d
+  vikunja-db:
+    image: postgres:16
+    container_name: vikunja-db
+    profiles: ["ops"]
+    environment:
+      - POSTGRES_PASSWORD=${VIKUNJA_DB_PASSWORD:-vikunja}
+      - POSTGRES_USER=${VIKUNJA_DB_USER:-vikunja}
+      - POSTGRES_DB=${VIKUNJA_DB_NAME:-vikunja}
+      - TZ=${TZ}
+    volumes:
+      - vikunja_db:/var/lib/postgresql/data
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  vikunja-api:
+    image: vikunja/api:latest
+    container_name: vikunja-api
+    profiles: ["ops"]
+    depends_on:
+      - vikunja-db
+    environment:
+      - VIKUNJA_DATABASE_TYPE=postgres
+      - VIKUNJA_DATABASE_HOST=vikunja-db
+      - VIKUNJA_DATABASE_USER=${VIKUNJA_DB_USER:-vikunja}
+      - VIKUNJA_DATABASE_PASSWORD=${VIKUNJA_DB_PASSWORD:-vikunja}
+      - VIKUNJA_DATABASE_DATABASE=${VIKUNJA_DB_NAME:-vikunja}
+      - VIKUNJA_SERVICE_JWTSECRET=${VIKUNJA_JWT_SECRET:-change-me}
+      - VIKUNJA_SERVICE_PUBLICURL=https://tasks.${FAMILY_DOMAIN}
+      - VIKUNJA_SERVICE_ENABLEREGISTRATION=${VIKUNJA_ENABLE_REGISTRATION:-false}
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tasks-api.rule=Host(`tasks.${FAMILY_DOMAIN}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.tasks-api.entrypoints=websecure"
+      - "traefik.http.routers.tasks-api.tls=true"
+      - "traefik.http.routers.tasks-api.middlewares=auth"
+      - "traefik.http.services.tasks-api.loadbalancer.server.port=3456"
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  vikunja-frontend:
+    image: vikunja/frontend:latest
+    container_name: vikunja-frontend
+    profiles: ["ops"]
+    depends_on:
+      - vikunja-api
+    environment:
+      - VIKUNJA_API_URL=https://tasks.${FAMILY_DOMAIN}/api/v1
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tasks.rule=Host(`tasks.${FAMILY_DOMAIN}`)"
+      - "traefik.http.routers.tasks.entrypoints=websecure"
+      - "traefik.http.routers.tasks.tls=true"
+      - "traefik.http.routers.tasks.middlewares=auth"
+      - "traefik.http.services.tasks.loadbalancer.server.port=80"
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
 volumes:
   lldap_data:
   keycloak_data:
+  vikunja_db:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.
   nextcloud_aio_mastercontainer:
     external: true

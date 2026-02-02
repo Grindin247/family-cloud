@@ -108,6 +108,7 @@ cat > "$COREFILE" <<EOF
     $LAN_IP ldap.$FAMILY_DOMAIN
     $LAN_IP nextcloud.$FAMILY_DOMAIN
     $LAN_IP nextcloudsetup.$FAMILY_DOMAIN
+    $LAN_IP tasks.$FAMILY_DOMAIN
     fallthrough
     }
 
@@ -143,11 +144,22 @@ fi
 say "Next steps"
 cat <<EOF
 1) Review .env: $ENV_FILE
-2) Start services: docker compose up -d
-3) Point your router DNS to this host (or run coredns as your LAN DNS) and trust the generated certificate on your devices.
+2) Start core services: docker compose up -d
+3) (Optional) Start task tracker: docker compose --profile ops up -d
+4) (Optional) Create first Vikunja admin user:
+     - set VIKUNJA_ENABLE_REGISTRATION=true in .env
+     - docker compose --profile ops up -d
+     - ./scripts/vikunja-create-admin.sh
+     - set VIKUNJA_ENABLE_REGISTRATION=false in .env
+     - docker compose --profile ops up -d
+
+DNS/TLS notes:
+- Point your router DNS to this host (or run coredns as your LAN DNS).
+- Trust the generated wildcard cert on your devices.
 
 Hostnames will be:
 - https://traefik.$FAMILY_DOMAIN
 - https://keycloak.$FAMILY_DOMAIN
 - https://nextcloud.$FAMILY_DOMAIN
+- https://tasks.$FAMILY_DOMAIN
 EOF
