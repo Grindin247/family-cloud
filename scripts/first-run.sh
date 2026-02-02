@@ -65,17 +65,31 @@ nextcloud_admin_pw=$(rand_b64)
 say "Writing .env"
 cp "$ENV_EXAMPLE" "$ENV_FILE"
 
-# Replace placeholders (simple, predictable substitutions)
-perl -pi -e "s/^FAMILY_DOMAIN=.*/FAMILY_DOMAIN=$base_domain/" "$ENV_FILE"
-perl -pi -e "s/^LAN_IP=.*/LAN_IP=$lan_ip/" "$ENV_FILE"
-perl -pi -e "s/^TZ=.*/TZ=$tz/" "$ENV_FILE"
+# Replace placeholders safely (secrets may contain / + other chars)
+python3 - <<PY
+import pathlib
+import re
 
-perl -pi -e "s/^KEYCLOAK_ADMIN_PASSWORD=.*/KEYCLOAK_ADMIN_PASSWORD=$keycloak_admin_pw/" "$ENV_FILE"
-perl -pi -e "s/^OIDC_CLIENT_SECRET=.*/OIDC_CLIENT_SECRET=$oidc_secret/" "$ENV_FILE"
-perl -pi -e "s/^FORWARD_AUTH_COOKIE_SECRET=.*/FORWARD_AUTH_COOKIE_SECRET=$forward_auth_secret/" "$ENV_FILE"
-perl -pi -e "s/^LLDAP_JWT_SECRET=.*/LLDAP_JWT_SECRET=$lldap_jwt_secret/" "$ENV_FILE"
-perl -pi -e "s/^LLDAP_ADMIN_PASSWORD=.*/LLDAP_ADMIN_PASSWORD=$lldap_admin_pw/" "$ENV_FILE"
-perl -pi -e "s/^NEXTCLOUD_ADMIN_PASSWORD=.*/NEXTCLOUD_ADMIN_PASSWORD=$nextcloud_admin_pw/" "$ENV_FILE"
+p = pathlib.Path("$ENV_FILE")
+text = p.read_text()
+
+repls = {
+  "FAMILY_DOMAIN": """$base_domain""",
+  "LAN_IP": """$lan_ip""",
+  "TZ": """$tz""",
+  "KEYCLOAK_ADMIN_PASSWORD": """$keycloak_admin_pw""",
+  "OIDC_CLIENT_SECRET": """$oidc_secret""",
+  "FORWARD_AUTH_COOKIE_SECRET": """$forward_auth_secret""",
+  "LLDAP_JWT_SECRET": """$lldap_jwt_secret""",
+  "LLDAP_ADMIN_PASSWORD": """$lldap_admin_pw""",
+  "NEXTCLOUD_ADMIN_PASSWORD": """$nextcloud_admin_pw""",
+}
+
+for k,v in repls.items():
+    text = re.sub(rf"^{re.escape(k)}=.*$", f"{k}={v}", text, flags=re.M)
+
+p.write_text(text)
+PY
 
 say "Preparing docker network/volumes"
 # Network + volume creation are idempotent
