@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Must run the following commands before running docker compose up.
-#     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard.callender434.fam.key   -out certs/wildcard.callender434.fam.crt   -subj "/CN=*.callender434.fam"   -addext "subjectAltName=DNS:*.callender434.fam,DNS:family"
+#     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard..key   -out certs/wildcard..crt   -subj "/CN=*."   -addext "subjectAltName=DNS:*.,DNS:family"
 #     $ docker volume create nextcloud_aio_mastercontainer
 #     $ docker network create --subnet=172.20.0.0/24 --driver=bridge familynet
 #
@@ -32,7 +32,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(`traefik.callender434.fam`)"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.tls=true"
       - "traefik.http.routers.traefik.service=api@internal"
@@ -51,16 +51,16 @@ services:
     container_name: auth
     environment:
       - DEFAULT_PROVIDER=oidc
-      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.callender434.fam/realms/familycloud
+      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak./realms/familycloud
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
-      - PROVIDERS_OIDC_CLIENT_SECRET=secret123
-      - SECRET=supersecretcookie
-      - COOKIE_DOMAIN=auth.callender434.fam
-      - AUTH_HOST=auth.callender434.fam
+      - PROVIDERS_OIDC_CLIENT_SECRET=
+      - SECRET=
+      - COOKIE_DOMAIN=auth.
+      - AUTH_HOST=auth.
       - LOG_LEVEL=debug
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.auth.rule=Host(`auth.callender434.fam`)"
+      - "traefik.http.routers.auth.rule=Host(`auth.`)"
       - "traefik.http.routers.auth.entrypoints=websecure"
       - "traefik.http.routers.auth.tls=true"
       - "traefik.http.services.auth.loadbalancer.server.port=4181"
@@ -68,7 +68,7 @@ services:
       keycloak:
         condition: service_healthy
     volumes:
-      - ./certs/wildcard.callender434.fam.crt:/etc/ssl/certs/wildcard.callender434.fam.crt:ro
+      - ./certs/wildcard..crt:/etc/ssl/certs/wildcard..crt:ro
     networks:
       - familynet
     dns:
@@ -80,7 +80,7 @@ services:
     environment:
       - LLDAP_JWT_SECRET=supersecretjwtkeychangeit
       - LLDAP_LDAP_BASE_DN=dc=example,dc=com
-      - LLDAP_LDAP_USER_PASS=adminpasswordchangeit
+      - LLDAP_LDAP_USER_PASS=
     volumes:
       - lldap_data:/data
     ports:
@@ -88,7 +88,7 @@ services:
       - "17170:17170"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ldap.rule=Host(`ldap.callender434.fam`)"
+      - "traefik.http.routers.ldap.rule=Host(`ldap.`)"
       - "traefik.http.routers.ldap.entrypoints=websecure"
       - "traefik.http.routers.ldap.tls=true"
       - "traefik.http.services.ldap.loadbalancer.server.port=17170"
@@ -123,8 +123,8 @@ services:
         condition: service_healthy
     environment:
       - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=adminpasswordchangeit
-      - KC_HOSTNAME=keycloak.callender434.fam
+      - KEYCLOAK_ADMIN_PASSWORD=
+      - KC_HOSTNAME=keycloak.
       - KC_HTTP_ENABLED=true
       - KC_PROXY=edge
       - KC_HOSTNAME_STRICT=false
@@ -133,7 +133,7 @@ services:
       - ./keycloak-config.sh:/opt/keycloak/keycloak-config.sh:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.keycloak.rule=Host(`keycloak.callender434.fam`)"
+      - "traefik.http.routers.keycloak.rule=Host(`keycloak.`)"
       - "traefik.http.routers.keycloak.entrypoints=websecure"
       - "traefik.http.routers.keycloak.tls=true"
       - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
@@ -171,17 +171,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - NEXTCLOUD_DATADIR=/mnt/ncdata
-      - NEXTCLOUD_ADMIN_PASSWORD=adminpasswordchangeit
+      - NEXTCLOUD_ADMIN_PASSWORD=
       - NEXTCLOUD_ADMIN_USER=admin
       - APACHE_PORT=11000
       - APACHE_IP_BINDING=0.0.0.0
       - APACHE_ADDITIONAL_NETWORK=familynet
       - SKIP_DOMAIN_VALIDATION=true
-      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.callender434.fam
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.
       - NEXTCLOUD_WOPI_SKIP_SSL_VERIFY=true
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.nextcloudsetup.rule=Host(`nextcloudsetup.callender434.fam`)"
+      - "traefik.http.routers.nextcloudsetup.rule=Host(`nextcloudsetup.`)"
       - "traefik.http.routers.nextcloudsetup.entrypoints=websecure"
       - "traefik.http.routers.nextcloudsetup.tls=true"
       - "traefik.http.routers.nextcloudsetup.service=nextcloudsetup"

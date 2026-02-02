@@ -21,8 +21,8 @@ done
   -s clientId=traefik-forward-auth \
   -s enabled=true \
   -s clientAuthenticatorType=client-secret \
-  -s secret=secret123 \
-  -s redirectUris='["https://auth.callender434.fam/_oauth/*"]' \
+  -s secret= \
+  -s redirectUris='["https://auth./_oauth/*"]' \
   -s standardFlowEnabled=true \
   -s serviceAccountsEnabled=true || true
 
@@ -31,7 +31,7 @@ done
   -s clientId=nextcloud \
   -s enabled=true \
   -s clientAuthenticatorType=client-secret \
-  -s secret=secret123 \
+  -s secret= \
   -s redirectUris='["*"]' \
   -s standardFlowEnabled=true \
   -s serviceAccountsEnabled=true || true
@@ -56,6 +56,6 @@ REALM_ID=$(/opt/keycloak/bin/kcadm.sh get realms/familycloud --fields id --forma
     "connectionUrl": ["ldap://ldap:3890"],
     "usersDn": ["ou=people,dc=example,dc=com"],
     "bindDn": ["uid=admin,ou=people,dc=example,dc=com"],
-    "bindCredential": ["adminpasswordchangeit"],
+    "bindCredential": [""],
     "searchScope": ["2"]
   }' || true

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Family-Cloud Kanban</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #121a33;
+      --muted: #8ea0c2;
+      --text: #e7eeff;
+      --accent: #7aa2ff;
+      --border: rgba(255,255,255,0.10);
+      --shadow: 0 12px 30px rgba(0,0,0,0.35);
+      --radius: 14px;
+      --colw: 320px;
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(1200px 600px at 10% 10%, rgba(122,162,255,0.18), transparent),
+                  radial-gradient(900px 600px at 80% 20%, rgba(162,122,255,0.12), transparent),
+                  var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 18px 22px;
+      display: flex;
+      gap: 18px;
+      align-items: baseline;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      backdrop-filter: blur(8px);
+      background: rgba(11,16,32,0.72);
+      z-index: 10;
+    }
+    header h1 { margin: 0; font-size: 18px; letter-spacing: 0.2px; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    header .spacer { flex: 1; }
+    header button {
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    header button:hover { border-color: rgba(122,162,255,0.6); }
+
+    main { padding: 18px 18px 26px; }
+
+    .board {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: var(--colw);
+      gap: 14px;
+      overflow-x: auto;
+      padding-bottom: 12px;
+    }
+    .col {
+      background: rgba(18,26,51,0.55);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      min-height: 65vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .col header {
+      position: unset;
+      backdrop-filter: none;
+      background: transparent;
+      border-bottom: 1px solid var(--border);
+      padding: 14px 14px 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .col header h2 { margin: 0; font-size: 14px; }
+    .count { margin-left: auto; font-size: 12px; color: var(--muted); }
+    .list {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+    }
+    .card {
+      background: rgba(18,26,51,0.9);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 10px 8px;
+    }
+    .card .title {
+      font-weight: 600;
+      font-size: 13px;
+      line-height: 1.25;
+      margin-bottom: 6px;
+    }
+    .card .body {
+      font-size: 12px;
+      line-height: 1.35;
+      color: rgba(231,238,255,0.86);
+      white-space: pre-wrap;
+    }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(122,162,255,0.12);
+      border: 1px solid rgba(122,162,255,0.22);
+      color: rgba(231,238,255,0.9);
+    }
+    .small { color: var(--muted); font-size: 11px; margin-top: 8px; }
+    .toolbar {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .toolbar input, .toolbar textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.18);
+      color: var(--text);
+      font-size: 12px;
+    }
+    .toolbar textarea { min-height: 56px; resize: vertical; }
+    .toolbar .row { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .toolbar .row.single { grid-template-columns: 1fr; }
+    .toolbar .actions { width: 100%; display: flex; gap: 8px; }
+    .toolbar .actions button { flex: 1; }
+
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      display: none; align-items: center; justify-content: center; padding: 18px;
+      z-index: 50;
+    }
+    .modal.show { display: flex; }
+    .modal .panel {
+      width: min(820px, 98vw);
+      background: rgba(18,26,51,0.95);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+    .modal pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.20);
+      overflow: auto;
+      max-height: 60vh;
+      color: rgba(231,238,255,0.92);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Family-Cloud Kanban</h1>
+    <div class="meta" id="meta"></div>
+    <div class="spacer"></div>
+    <button id="btnExport">Export JSON</button>
+    <button id="btnImport">Import JSON</button>
+  </header>
+
+  <main>
+    <div class="hint">
+      Local-only Kanban stored in <code>localStorage</code>. Drag cards between columns. Use Export/Import to share state.
+    </div>
+
+    <section class="toolbar" aria-label="Add task">
+      <div class="row">
+        <input id="tTitle" placeholder="Task title" />
+        <input id="tTags" placeholder="Tags (comma-separated)" />
+      </div>
+      <div class="row single">
+        <textarea id="tBody" placeholder="Details / acceptance criteria"></textarea>
+      </div>
+      <div class="actions">
+        <button id="btnAdd">Add to Backlog</button>
+        <button id="btnReset" title="Reset to default seed board">Reset seed board</button>
+      </div>
+    </section>
+
+    <section class="board" id="board"></section>
+  </main>
+
+  <div class="modal" id="modal">
+    <div class="panel">
+      <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+        <div style="font-weight:600;">Board JSON</div>
+        <div style="margin-left:auto;"></div>
+        <button id="btnClose">Close</button>
+      </div>
+      <pre id="jsonOut"></pre>
+      <div class="hint" style="margin-top:10px;">
+        Tip: Copy this JSON somewhere safe, or paste JSON into the prompt when importing.
+      </div>
+    </div>
+  </div>
+
+<script>
+  const STORAGE_KEY = 'family-cloud-kanban-v1';
+
+  const seed = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    columns: [
+      {
+        id: 'backlog',
+        name: 'Backlog',
+        cards: [
+          {
+            id: 't-readme',
+            title: 'Write real README + install guide (Ubuntu)',
+            body: 'Acceptance: someone can go from 0 → running stack with clear prerequisites, DNS notes, and troubleshooting. Include dev vs prod modes.',
+            tags: ['docs','v1']
+          },
+          {
+            id: 't-env',
+            title: 'Parameterize domain/IP + move secrets to .env + generated secrets',
+            body: 'Replace callender434.fam + 192.168.1.27. Add .env.example + scripts/generate-secrets.sh. Remove hard-coded secrets from compose.',
+            tags: ['security','refactor','v1']
+          },
+          {
+            id: 't-modes',
+            title: 'Dev vs Prod profile (Keycloak/Traefik TLS, hostname strictness)',
+            body: 'Docker compose profiles or separate compose files. Make “safe local dev” explicit; prod defaults should not be start-dev.',
+            tags: ['security','infra']
+          },
+          {
+            id: 't-ai',
+            title: 'Add AI Vault v1: ingest + local search + recap',
+            body: 'Define MVP: folder watcher + OCR + embeddings + weekly recap. Decide local runner (Ollama) + vector store.',
+            tags: ['ai','v1']
+          },
+          {
+            id: 't-apps',
+            title: 'Add Paperless-ngx + Immich + Jellyfin modules',
+            body: 'Compose add-ons with Traefik routing + SSO plan. Keep optional via profiles.',
+            tags: ['apps','v1']
+          }
+        ]
+      },
+      { id: 'next', name: 'Next up', cards: [] },
+      { id: 'doing', name: 'Doing', cards: [] },
+      { id: 'blocked', name: 'Blocked', cards: [] },
+      { id: 'done', name: 'Done', cards: [
+        { id: 't-clone', title: 'Clone repo into workspace', body: 'Repo cloned successfully.', tags: ['setup'] }
+      ] }
+    ]
+  };
+
+  function loadBoard() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return structuredClone(seed);
+    try { return JSON.parse(raw); } catch { return structuredClone(seed); }
+  }
+  function saveBoard(board) {
+    board.updatedAt = new Date().toISOString();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(board));
+    document.getElementById('meta').textContent = `Updated ${new Date(board.updatedAt).toLocaleString()}`;
+  }
+
+  let board = loadBoard();
+
+  function el(tag, attrs={}, children=[]) {
+    const n = document.createElement(tag);
+    for (const [k,v] of Object.entries(attrs)) {
+      if (k === 'class') n.className = v;
+      else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k, v);
+    }
+    for (const c of children) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    return n;
+  }
+
+  function render() {
+    const root = document.getElementById('board');
+    root.innerHTML = '';
+
+    board.columns.forEach(col => {
+      const list = el('div', { class: 'list', 'data-col': col.id });
+      list.addEventListener('dragover', (e) => { e.preventDefault(); });
+      list.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const cardId = e.dataTransfer.getData('text/cardId');
+        const fromCol = e.dataTransfer.getData('text/fromCol');
+        if (!cardId || !fromCol) return;
+        moveCard(fromCol, col.id, cardId);
+      });
+
+      col.cards.forEach(card => {
+        const cardEl = el('div', { class: 'card', draggable: 'true' }, [
+          el('div', { class: 'title' }, [card.title]),
+          el('div', { class: 'body' }, [card.body || '']),
+          el('div', { class: 'tags' }, (card.tags||[]).map(t => el('span', { class: 'tag' }, [t]))),
+          el('div', { class: 'small' }, [`#${card.id}`])
+        ]);
+        cardEl.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/cardId', card.id);
+          e.dataTransfer.setData('text/fromCol', col.id);
+        });
+        list.appendChild(cardEl);
+      });
+
+      const colEl = el('section', { class: 'col' }, [
+        el('header', {}, [
+          el('h2', {}, [col.name]),
+          el('div', { class: 'count' }, [`${col.cards.length}`])
+        ]),
+        list
+      ]);
+      root.appendChild(colEl);
+    });
+
+    saveBoard(board);
+  }
+
+  function moveCard(fromColId, toColId, cardId) {
+    if (fromColId === toColId) return;
+    const from = board.columns.find(c => c.id === fromColId);
+    const to = board.columns.find(c => c.id === toColId);
+    if (!from || !to) return;
+    const idx = from.cards.findIndex(c => c.id === cardId);
+    if (idx < 0) return;
+    const [card] = from.cards.splice(idx, 1);
+    to.cards.unshift(card);
+    render();
+  }
+
+  function addCardToBacklog(title, body, tags) {
+    const col = board.columns.find(c => c.id === 'backlog');
+    const id = `t-${Math.random().toString(16).slice(2,10)}`;
+    col.cards.unshift({ id, title, body, tags });
+    render();
+  }
+
+  const modal = document.getElementById('modal');
+  const jsonOut = document.getElementById('jsonOut');
+
+  document.getElementById('btnExport').addEventListener('click', () => {
+    jsonOut.textContent = JSON.stringify(board, null, 2);
+    modal.classList.add('show');
+  });
+  document.getElementById('btnClose').addEventListener('click', () => modal.classList.remove('show'));
+
+  document.getElementById('btnImport').addEventListener('click', async () => {
+    const input = prompt('Paste board JSON to import:');
+    if (!input) return;
+    try {
+      const parsed = JSON.parse(input);
+      board = parsed;
+      render();
+    } catch (e) {
+      alert('Invalid JSON');
+    }
+  });
+
+  document.getElementById('btnAdd').addEventListener('click', () => {
+    const title = document.getElementById('tTitle').value.trim();
+    if (!title) return;
+    const body = document.getElementById('tBody').value.trim();
+    const tags = document.getElementById('tTags').value.split(',').map(s => s.trim()).filter(Boolean);
+    addCardToBacklog(title, body, tags);
+    document.getElementById('tTitle').value = '';
+    document.getElementById('tBody').value = '';
+    document.getElementById('tTags').value = '';
+  });
+
+  document.getElementById('btnReset').addEventListener('click', () => {
+    if (!confirm('Reset board to seed state? This clears your local changes.')) return;
+    board = structuredClone(seed);
+    render();
+  });
+
+  // initial
+  document.getElementById('meta').textContent = `Updated ${new Date(board.updatedAt).toLocaleString()}`;
+  render();
+</script>
+</body>
+</html>

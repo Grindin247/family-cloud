@@ -1,11 +1,11 @@
 . {
     hosts {
-    192.168.1.27 traefik.callender434.fam
-    192.168.1.27 auth.callender434.fam
-    192.168.1.27 keycloak.callender434.fam
-    192.168.1.27 ldap.callender434.fam
-    192.168.1.27 nextcloud.callender434.fam
-	192.168.1.27 nextcloudsetup.callender434.fam
+     traefik.
+     auth.
+     keycloak.
+     ldap.
+     nextcloud.
+	 nextcloudsetup.
     fallthrough
 	}
 
