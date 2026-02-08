@@ -1,16 +1,18 @@
 . {
     hosts {
-     traefik.
-     auth.
-     keycloak.
-     ldap.
-     nextcloud.
-	 nextcloudsetup.
+    192.168.1.52 traefik.family.callender
+    192.168.1.52 auth.family.callender
+    192.168.1.52 keycloak.family.callender
+    192.168.1.52 ldap.family.callender
+    192.168.1.52 nextcloud.family.callender
+    192.168.1.52 nextcloudsetup.family.callender
+    192.168.1.52 tasks.family.callender
     fallthrough
-	}
+    }
 
+    # Upstream resolver (set to your router or preferred DNS)
     forward . 192.168.1.1
-	cache 300
-	log
-	errors
+    cache 300
+    log
+    errors
 }

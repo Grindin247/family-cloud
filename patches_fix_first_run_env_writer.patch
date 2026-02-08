@@ -1,0 +1,60 @@
+From ae560e9719e44adaf6d4c06e0fca3866852ac43c Mon Sep 17 00:00:00 2001
+From: Caleb <caleb@bot.fam>
+Date: Mon, 2 Feb 2026 18:53:29 -0500
+Subject: [PATCH] Fix first-run .env writing: handle secrets with special
+ characters
+
+---
+ scripts/first-run.sh | 36 +++++++++++++++++++++++++-----------
+ 1 file changed, 25 insertions(+), 11 deletions(-)
+
+diff --git a/scripts/first-run.sh b/scripts/first-run.sh
+index 14071f7..3890222 100755
+--- a/scripts/first-run.sh
++++ b/scripts/first-run.sh
+@@ -65,17 +65,31 @@ nextcloud_admin_pw=$(rand_b64)
+ say "Writing .env"
+ cp "$ENV_EXAMPLE" "$ENV_FILE"
+ 
+-# Replace placeholders (simple, predictable substitutions)
+-perl -pi -e "s/^FAMILY_DOMAIN=.*/FAMILY_DOMAIN=$base_domain/" "$ENV_FILE"
+-perl -pi -e "s/^LAN_IP=.*/LAN_IP=$lan_ip/" "$ENV_FILE"
+-perl -pi -e "s/^TZ=.*/TZ=$tz/" "$ENV_FILE"
+-
+-perl -pi -e "s/^KEYCLOAK_ADMIN_PASSWORD=.*/KEYCLOAK_ADMIN_PASSWORD=$keycloak_admin_pw/" "$ENV_FILE"
+-perl -pi -e "s/^OIDC_CLIENT_SECRET=.*/OIDC_CLIENT_SECRET=$oidc_secret/" "$ENV_FILE"
+-perl -pi -e "s/^FORWARD_AUTH_COOKIE_SECRET=.*/FORWARD_AUTH_COOKIE_SECRET=$forward_auth_secret/" "$ENV_FILE"
+-perl -pi -e "s/^LLDAP_JWT_SECRET=.*/LLDAP_JWT_SECRET=$lldap_jwt_secret/" "$ENV_FILE"
+-perl -pi -e "s/^LLDAP_ADMIN_PASSWORD=.*/LLDAP_ADMIN_PASSWORD=$lldap_admin_pw/" "$ENV_FILE"
+-perl -pi -e "s/^NEXTCLOUD_ADMIN_PASSWORD=.*/NEXTCLOUD_ADMIN_PASSWORD=$nextcloud_admin_pw/" "$ENV_FILE"
++# Replace placeholders safely (secrets may contain / + other chars)
++python3 - <<PY
++import pathlib
++import re
++
++p = pathlib.Path("$ENV_FILE")
++text = p.read_text()
++
++repls = {
++  "FAMILY_DOMAIN": """$base_domain""",
++  "LAN_IP": """$lan_ip""",
++  "TZ": """$tz""",
++  "KEYCLOAK_ADMIN_PASSWORD": """$keycloak_admin_pw""",
++  "OIDC_CLIENT_SECRET": """$oidc_secret""",
++  "FORWARD_AUTH_COOKIE_SECRET": """$forward_auth_secret""",
++  "LLDAP_JWT_SECRET": """$lldap_jwt_secret""",
++  "LLDAP_ADMIN_PASSWORD": """$lldap_admin_pw""",
++  "NEXTCLOUD_ADMIN_PASSWORD": """$nextcloud_admin_pw""",
++}
++
++for k,v in repls.items():
++    text = re.sub(rf"^{re.escape(k)}=.*$", f"{k}={v}", text, flags=re.M)
++
++p.write_text(text)
++PY
+ 
+ say "Preparing docker network/volumes"
+ # Network + volume creation are idempotent
+-- 
+2.43.0
+

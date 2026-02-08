@@ -1,13 +1,63 @@
 http:
+  middlewares:
+    auth:
+      forwardAuth:
+        address: http://auth:4181
+        trustForwardHeader: true
+        authResponseHeaders:
+          - X-Forwarded-User
+
   routers:
+    traefik:
+      rule: "Host(`traefik.family.callender`)"
+      entryPoints: [web]
+      service: api@internal
+
+    keycloak:
+      rule: "Host(`keycloak.family.callender`)"
+      entryPoints: [web]
+      service: keycloak
+
+    auth:
+      rule: "Host(`auth.family.callender`)"
+      entryPoints: [web]
+      service: auth
+
     nextcloud:
-      rule: "Host(`nextcloud.${FAMILY_DOMAIN}`)"
-      entryPoints:
-        - websecure
+      rule: "Host(`nextcloud.family.callender`)"
+      entryPoints: [web]
       service: nextcloud
-      tls: true
+
+    # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
+    tasks-api:
+      rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
+      entryPoints: [web]
+      service: tasks
+
+    # Protect the UI
+    tasks:
+      rule: "Host(`tasks.family.callender`)"
+      entryPoints: [web]
+      service: tasks
+      middlewares: [auth]
+
+    ldap:
+      rule: "Host(`ldap.family.callender`)"
+      entryPoints: [web]
+      service: ldap
+      middlewares: [auth]
 
   services:
+    keycloak:
+      loadBalancer:
+        servers:
+          - url: "http://keycloak:8080"
+
+    auth:
+      loadBalancer:
+        servers:
+          - url: "http://auth:4181"
+
     nextcloud:
       loadBalancer:
         servers:
@@ -15,11 +65,16 @@ http:
         passHostHeader: true
         serversTransport: "insecure-transport"
 
+    tasks:
+      loadBalancer:
+        servers:
+          - url: "http://vikunja:3456"
+
+    ldap:
+      loadBalancer:
+        servers:
+          - url: "http://ldap:17170"
+
   serversTransports:
     insecure-transport:
       insecureSkipVerify: true
-
-tls:
-  certificates:
-    - certFile: /certs/wildcard.${FAMILY_DOMAIN}.crt
-      keyFile: /certs/wildcard.${FAMILY_DOMAIN}.key

@@ -11,14 +11,17 @@ version: '3.8'
 services:
 
   traefik:
-    image: traefik:v3.0
+    # Use a recent Traefik v3.x to match modern Docker API versions
+    image: traefik:v3.3
+    environment:
+      # Some environments enforce a higher minimum Docker API version.
+      # Force Traefik's Docker client to use a modern API.
+      - DOCKER_API_VERSION=1.53
     container_name: traefik
     command:
       - --api.dashboard=true
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.filename=/etc/traefik/dynamic.yml
       - --providers.file.watch=true
@@ -29,7 +32,8 @@ services:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic:/etc/traefik/dynamic:ro
       - ./certs:/certs:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Docker socket not needed in file-provider-only mode
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`traefik.${FAMILY_DOMAIN}`)"
@@ -51,11 +55,17 @@ services:
     container_name: auth
     environment:
       - DEFAULT_PROVIDER=oidc
-      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
+      # Dev/no-router mode: use HTTP issuer via Traefik
+      - PROVIDERS_OIDC_ISSUER_URL=http://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
       - PROVIDERS_OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - SECRET=${FORWARD_AUTH_COOKIE_SECRET}
-      - COOKIE_DOMAIN=.${FAMILY_DOMAIN}
+
+      # HTTP mode requires non-secure cookies
+      - INSECURE_COOKIE=true
+      # Use base domain for cookie scope
+      - COOKIE_DOMAIN=${FAMILY_DOMAIN}
+
       - AUTH_HOST=auth.${FAMILY_DOMAIN}
       - LOG_LEVEL=debug
     labels:
@@ -104,9 +114,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./Corefile:/Corefile:ro
+    # No-router-change mode:
+    # Don't bind to host :53 (often already used by systemd-resolved).
+    # Bind to 1053 instead for debugging, or remove ports entirely.
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
+      - "1053:53/udp"
+      - "1053:53/tcp"
     restart: unless-stopped
     networks:
       familynet:
@@ -124,6 +137,8 @@ services:
     environment:
       - KEYCLOAK_ADMIN=admin
       - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+      # Dev/no-router-change mode:
+      # Set Keycloak's advertised hostname to the external hostname so browser redirects are valid.
       - KC_HOSTNAME=keycloak.${FAMILY_DOMAIN}
       - KC_HTTP_ENABLED=true
       - KC_PROXY=edge
@@ -166,6 +181,9 @@ services:
     container_name: nextcloud-aio-mastercontainer
     restart: unless-stopped
     privileged: true
+    # Expose the AIO setup UI on the host. This does NOT conflict with Traefik.
+    ports:
+      - "8080:8080"
     volumes:
       - nextcloud_aio_mastercontainer:/mnt/docker-aio-config
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -177,7 +195,8 @@ services:
       - APACHE_IP_BINDING=0.0.0.0
       - APACHE_ADDITIONAL_NETWORK=familynet
       - SKIP_DOMAIN_VALIDATION=true
-      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.${FAMILY_DOMAIN}
+      # NOTE: AIO does not support NEXTCLOUD_TRUSTED_DOMAINS env var; keep domain setup inside AIO UI
+      # - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.${FAMILY_DOMAIN}
       - NEXTCLOUD_WOPI_SKIP_SSL_VERIFY=true
     labels:
       - "traefik.enable=true"
@@ -215,12 +234,15 @@ services:
     dns:
       - 172.20.0.11
 
-  vikunja-api:
-    image: vikunja/api:latest
-    container_name: vikunja-api
+  vikunja:
+    # Combined Vikunja image (frontend + api)
+    image: vikunja/vikunja:latest
+    container_name: vikunja
     profiles: ["ops"]
     depends_on:
       - vikunja-db
+    # Image runs as non-root; mount writable volumes and set a writable cache dir
+    user: "0:0"
     environment:
       - VIKUNJA_DATABASE_TYPE=postgres
       - VIKUNJA_DATABASE_HOST=vikunja-db
@@ -230,35 +252,17 @@ services:
       - VIKUNJA_SERVICE_JWTSECRET=${VIKUNJA_JWT_SECRET:-change-me}
       - VIKUNJA_SERVICE_PUBLICURL=https://tasks.${FAMILY_DOMAIN}
       - VIKUNJA_SERVICE_ENABLEREGISTRATION=${VIKUNJA_ENABLE_REGISTRATION:-false}
+      - XDG_CACHE_HOME=/tmp/.cache
       - TZ=${TZ}
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.tasks-api.rule=Host(`tasks.${FAMILY_DOMAIN}`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.tasks-api.entrypoints=websecure"
-      - "traefik.http.routers.tasks-api.tls=true"
-      - "traefik.http.routers.tasks-api.middlewares=auth"
-      - "traefik.http.services.tasks-api.loadbalancer.server.port=3456"
-    networks:
-      - familynet
-    dns:
-      - 172.20.0.11
-
-  vikunja-frontend:
-    image: vikunja/frontend:latest
-    container_name: vikunja-frontend
-    profiles: ["ops"]
-    depends_on:
-      - vikunja-api
-    environment:
-      - VIKUNJA_API_URL=https://tasks.${FAMILY_DOMAIN}/api/v1
-      - TZ=${TZ}
+    volumes:
+      - vikunja_files:/app/vikunja/files
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.tasks.rule=Host(`tasks.${FAMILY_DOMAIN}`)"
       - "traefik.http.routers.tasks.entrypoints=websecure"
       - "traefik.http.routers.tasks.tls=true"
       - "traefik.http.routers.tasks.middlewares=auth"
-      - "traefik.http.services.tasks.loadbalancer.server.port=80"
+      - "traefik.http.services.tasks.loadbalancer.server.port=3456"
     networks:
       - familynet
     dns:
@@ -268,6 +272,7 @@ volumes:
   lldap_data:
   keycloak_data:
   vikunja_db:
+  vikunja_files:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.
   nextcloud_aio_mastercontainer:
     external: true
