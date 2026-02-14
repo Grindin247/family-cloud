@@ -1,0 +1,15 @@
+# Example Vikunja config enabling Keycloak OIDC.
+# Copy to config/vikunja/config.yml and replace placeholders.
+
+auth:
+  openid:
+    enabled: true
+    providers:
+      keycloak:
+        name: "Keycloak"
+        authurl: "https://keycloak.<your-domain>/realms/<your-realm>"
+        logouturl: "https://keycloak.<your-domain>/realms/<your-realm>/protocol/openid-connect/logout"
+        clientid: "vikunja"
+        clientsecret:
+          file: /run/secrets/vikunja_oidc_client_secret
+        scope: "openid profile email"

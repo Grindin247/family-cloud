@@ -56,11 +56,14 @@ tz=$(prompt_default TZ "Timezone" "America/New_York")
 
 say "Generating secrets"
 oidc_secret=$(rand_b64)
+nextcloud_oidc_secret=$(rand_b64)
 forward_auth_secret=$(rand_b64)
 lldap_jwt_secret=$(rand_b64)
 keycloak_admin_pw=$(rand_b64)
 lldap_admin_pw=$(rand_b64)
 nextcloud_admin_pw=$(rand_b64)
+decision_pg_pw=$(rand_b64)
+decision_jwt_secret=$(rand_b64)
 
 say "Writing .env"
 cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -79,10 +82,13 @@ repls = {
   "TZ": """$tz""",
   "KEYCLOAK_ADMIN_PASSWORD": """$keycloak_admin_pw""",
   "OIDC_CLIENT_SECRET": """$oidc_secret""",
+  "NEXTCLOUD_OIDC_CLIENT_SECRET": """$nextcloud_oidc_secret""",
   "FORWARD_AUTH_COOKIE_SECRET": """$forward_auth_secret""",
   "LLDAP_JWT_SECRET": """$lldap_jwt_secret""",
   "LLDAP_ADMIN_PASSWORD": """$lldap_admin_pw""",
   "NEXTCLOUD_ADMIN_PASSWORD": """$nextcloud_admin_pw""",
+  "DECISION_POSTGRES_PASSWORD": """$decision_pg_pw""",
+  "DECISION_JWT_SECRET": """$decision_jwt_secret""",
 }
 
 for k,v in repls.items():
@@ -123,11 +129,12 @@ cat > "$COREFILE" <<EOF
     $LAN_IP nextcloud.$FAMILY_DOMAIN
     $LAN_IP nextcloudsetup.$FAMILY_DOMAIN
     $LAN_IP tasks.$FAMILY_DOMAIN
+    $LAN_IP decision.$FAMILY_DOMAIN
     fallthrough
     }
 
     # Upstream resolver (set to your router or preferred DNS)
-    forward . 192.168.1.1
+    forward . 1.1.1.1 8.8.8.8
     cache 300
     log
     errors
@@ -176,4 +183,5 @@ Hostnames will be:
 - https://keycloak.$FAMILY_DOMAIN
 - https://nextcloud.$FAMILY_DOMAIN
 - https://tasks.$FAMILY_DOMAIN
+- https://decision.$FAMILY_DOMAIN
 EOF

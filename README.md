@@ -51,7 +51,7 @@ docker compose version
 ### 2) Clone repo
 
 ```bash
-git clone https://github.com/Grindin247/family-cloud.git
+git clone --recurse-submodules https://github.com/Grindin247/family-cloud.git
 cd family-cloud
 ```
 
@@ -80,13 +80,27 @@ What it does:
 docker compose up -d
 ```
 
-### 5) (Optional) Start task tracking / Kanban
+### 5) Enable Nextcloud login via Keycloak (user_oidc)
+
+After completing the Nextcloud AIO setup once at `https://nextcloudsetup.${FAMILY_DOMAIN}`:
+
+```bash
+./scripts/nextcloud-enable-user-oidc.sh
+```
+
+### 6) (Optional) Start task tracking / Kanban
 
 ```bash
 docker compose --profile ops up -d
 ```
 
-### 6) Create the first Vikunja admin user
+### 6b) (Optional) Start decision system
+
+```bash
+docker compose --profile decision up -d --build
+```
+
+### 7) Create the first Vikunja admin user
 
 Vikunja requires registration enabled to create the first user.
 
@@ -116,6 +130,7 @@ Once DNS + cert trust is set up:
 - Nextcloud AIO setup: `https://nextcloudsetup.${FAMILY_DOMAIN}`
 - Nextcloud (after setup): `https://nextcloud.${FAMILY_DOMAIN}`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
+- Decision system: `https://decision.${FAMILY_DOMAIN}`
 
 ---
 
@@ -139,11 +154,12 @@ Example (Windows): edit `C:\Windows\System32\drivers\etc\hosts` as Admin:
 192.168.1.27 nextcloudsetup.family.callender
 192.168.1.27 nextcloud.family.callender
 192.168.1.27 tasks.family.callender
+192.168.1.27 decision.family.callender
 ```
 
 Example (Linux/macOS): edit `/etc/hosts`:
 ```
-192.168.1.27 traefik.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender
+192.168.1.27 traefik.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender
 ```
 
 #### B2) Use CoreDNS manually on one machine
@@ -180,6 +196,34 @@ If DNS doesn’t resolve:
 
 If browser shows TLS warnings:
 - trust the generated wildcard cert on that device
+
+---
+
+## LLDAP user snapshot + preload
+
+Export current LDAP users/groups/memberships to a snapshot:
+
+```bash
+./scripts/lldap-export-users.sh
+```
+
+This writes a timestamped file to `backups/lldap/`, for example:
+`backups/lldap/users-snapshot-20260212T093257Z.json`
+
+Restore users into a fresh LLDAP container and assign a default password to every imported user:
+
+```bash
+./scripts/lldap-import-users-default-password.sh \
+  backups/lldap/users-snapshot-20260212T093257Z.json \
+  'ChangeMeNow!123' \
+  http://127.0.0.1:17170 \
+  '<LLDAP_ADMIN_PASSWORD>'
+```
+
+Notes:
+- `admin` is skipped during import (new containers already create it).
+- Passwords are not exported; imported users receive the default password you pass.
+- After import, users should change passwords on first login.
 
 ---
 

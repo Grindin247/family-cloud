@@ -6,6 +6,10 @@ http:
         trustForwardHeader: true
         authResponseHeaders:
           - X-Forwarded-User
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
 
   routers:
     traefik:
@@ -13,39 +17,83 @@ http:
       entryPoints: [web]
       service: api@internal
 
-    keycloak:
+    keycloak-http:
       rule: "Host(`keycloak.family.callender`)"
       entryPoints: [web]
       service: keycloak
 
-    auth:
+    keycloak:
+      rule: "Host(`keycloak.family.callender`)"
+      entryPoints: [websecure]
+      service: keycloak
+      tls: {}
+
+    auth-http:
       rule: "Host(`auth.family.callender`)"
       entryPoints: [web]
+      middlewares: [redirect-to-https]
       service: auth
+
+    auth:
+      rule: "Host(`auth.family.callender`)"
+      entryPoints: [websecure]
+      service: auth
+      tls: {}
+
+    nextcloud-http:
+      rule: "Host(`nextcloud.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: nextcloud
 
     nextcloud:
       rule: "Host(`nextcloud.family.callender`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: nextcloud
+      tls: {}
+
+    decision-http:
+      rule: "Host(`decision.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: decision
+
+    decision:
+      rule: "Host(`decision.family.callender`)"
+      entryPoints: [websecure]
+      service: decision
+      tls: {}
 
     # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
-    tasks-api:
+    tasks-api-http:
       rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
       entryPoints: [web]
+      middlewares: [redirect-to-https]
       service: tasks
 
+    tasks-api:
+      rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
+      entryPoints: [websecure]
+      service: tasks
+      tls: {}
+
     # Protect the UI
-    tasks:
+    tasks-http:
       rule: "Host(`tasks.family.callender`)"
       entryPoints: [web]
+      middlewares: [redirect-to-https]
       service: tasks
-      middlewares: [auth]
+
+    tasks:
+      rule: "Host(`tasks.family.callender`)"
+      entryPoints: [websecure]
+      service: tasks
+      tls: {}
 
     ldap:
       rule: "Host(`ldap.family.callender`)"
       entryPoints: [web]
       service: ldap
-      middlewares: [auth]
 
   services:
     keycloak:
@@ -74,6 +122,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://ldap:17170"
+
+    decision:
+      loadBalancer:
+        servers:
+          - url: "http://decision-nginx:80"
 
   serversTransports:
     insecure-transport:

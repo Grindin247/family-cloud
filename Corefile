@@ -7,11 +7,12 @@
     192.168.1.52 nextcloud.family.callender
     192.168.1.52 nextcloudsetup.family.callender
     192.168.1.52 tasks.family.callender
+    192.168.1.52 decision.family.callender
     fallthrough
     }
 
     # Upstream resolver (set to your router or preferred DNS)
-    forward . 192.168.1.1
+    forward . 1.1.1.1 8.8.8.8
     cache 300
     log
     errors
