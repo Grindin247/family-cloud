@@ -8,6 +8,7 @@ DOMAIN="${FAMILY_DOMAIN:-family.example}"
 TRAEFIK_CLIENT_SECRET="${OIDC_CLIENT_SECRET:-}"
 NEXTCLOUD_CLIENT_SECRET="${NEXTCLOUD_OIDC_CLIENT_SECRET:-}"
 VIKUNJA_CLIENT_SECRET="${VIKUNJA_OIDC_CLIENT_SECRET:-}"
+DECISION_SYNC_CLIENT_SECRET="${DECISION_KEYCLOAK_SYNC_CLIENT_SECRET:-}"
 LLDAP_BIND_PASSWORD="${LLDAP_ADMIN_PASSWORD:-}"
 LLDAP_GROUPS_DN="${LLDAP_GROUPS_DN:-ou=groups,dc=example,dc=com}"
 LLDAP_GROUP_OBJECT_CLASSES="${LLDAP_GROUP_OBJECT_CLASSES:-groupOfNames}"
@@ -95,6 +96,41 @@ upsert_client() {
   fi
 }
 
+upsert_service_client() {
+  local client_id="$1"
+  local secret="$2"
+  local existing_id
+
+  existing_id="$(/opt/keycloak/bin/kcadm.sh get clients -r "$REALM" -q clientId="$client_id" --fields id --format csv | grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n1 | tr 'A-F' 'a-f' || true)"
+
+  if [[ -z "$existing_id" ]]; then
+    say "Creating service-account client: $client_id"
+    /opt/keycloak/bin/kcadm.sh create clients -r "$REALM" \
+      -s clientId="$client_id" \
+      -s enabled=true \
+      -s protocol=openid-connect \
+      -s publicClient=false \
+      -s clientAuthenticatorType=client-secret \
+      -s secret="$secret" \
+      -s standardFlowEnabled=false \
+      -s directAccessGrantsEnabled=false \
+      -s serviceAccountsEnabled=true \
+      >/dev/null
+  else
+    say "Updating service-account client: $client_id"
+    /opt/keycloak/bin/kcadm.sh update "clients/$existing_id" -r "$REALM" \
+      -s enabled=true \
+      -s protocol=openid-connect \
+      -s publicClient=false \
+      -s clientAuthenticatorType=client-secret \
+      -s secret="$secret" \
+      -s standardFlowEnabled=false \
+      -s directAccessGrantsEnabled=false \
+      -s serviceAccountsEnabled=true \
+      >/dev/null
+  fi
+}
+
 upsert_client \
   "traefik-forward-auth" \
   "$TRAEFIK_CLIENT_SECRET" \
@@ -116,6 +152,29 @@ if [[ -n "${VIKUNJA_CLIENT_SECRET:-}" ]]; then
     "[\"https://tasks.${DOMAIN}\"]"
 else
   say "Skipping Vikunja client upsert (missing VIKUNJA_OIDC_CLIENT_SECRET and /run/secrets/vikunja_oidc_client_secret)"
+fi
+
+# Decision system Keycloak group sync (service account)
+if [[ -n "${DECISION_SYNC_CLIENT_SECRET:-}" ]]; then
+  upsert_service_client "decision-system-sync" "$DECISION_SYNC_CLIENT_SECRET"
+
+  # Grant the service account access to query groups and users.
+  DECISION_CLIENT_ID="$(/opt/keycloak/bin/kcadm.sh get clients -r "$REALM" -q clientId="decision-system-sync" --fields id --format csv | grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n1 | tr 'A-F' 'a-f' || true)"
+  if [[ -z "$DECISION_CLIENT_ID" ]]; then
+    say "Failed to resolve decision-system-sync client id; cannot grant roles"
+  else
+    SVC_USER_ID="$(/opt/keycloak/bin/kcadm.sh get "clients/$DECISION_CLIENT_ID/service-account-user" -r "$REALM" --fields id --format csv | grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n1 | tr 'A-F' 'a-f' || true)"
+    if [[ -z "$SVC_USER_ID" ]]; then
+      say "Failed to resolve service account user id for decision-system-sync; cannot grant roles"
+    else
+      for role in view-users query-users view-groups query-groups; do
+        /opt/keycloak/bin/kcadm.sh add-roles -r "$REALM" --uid "$SVC_USER_ID" --cclientid realm-management --rolename "$role" >/dev/null 2>&1 || true
+      done
+      say "Granted realm-management roles to decision-system-sync service account"
+    fi
+  fi
+else
+  say "Skipping decision-system-sync client upsert (missing DECISION_KEYCLOAK_SYNC_CLIENT_SECRET)"
 fi
 
 # Create/update LDAP user federation provider

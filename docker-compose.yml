@@ -55,9 +55,9 @@ services:
     container_name: auth
     environment:
       - DEFAULT_PROVIDER=oidc
-      # Dev/no-router mode: use HTTP issuer via Traefik
-      # Use in-network Keycloak to avoid external DNS/proxy dependency.
-      - PROVIDERS_OIDC_ISSUER_URL=http://keycloak:8080/realms/${KEYCLOAK_REALM}
+      # Use the same issuer hostname Keycloak advertises (must match discovery "issuer" exactly).
+      # We route this hostname back to the Keycloak container via Traefik over plain HTTP.
+      - PROVIDERS_OIDC_ISSUER_URL=http://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
       - PROVIDERS_OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - SECRET=${FORWARD_AUTH_COOKIE_SECRET}
@@ -141,6 +141,7 @@ services:
       - FAMILY_DOMAIN=${FAMILY_DOMAIN}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - NEXTCLOUD_OIDC_CLIENT_SECRET=${NEXTCLOUD_OIDC_CLIENT_SECRET}
+      - DECISION_KEYCLOAK_SYNC_CLIENT_SECRET=${DECISION_KEYCLOAK_SYNC_CLIENT_SECRET:-}
       - LLDAP_ADMIN_PASSWORD=${LLDAP_ADMIN_PASSWORD}
       # Optional: Keycloak LDAP Groups mapper tuning for LLDAP (defaults should work for typical LLDAP layouts).
       - LLDAP_GROUPS_DN=${LLDAP_GROUPS_DN:-ou=groups,dc=example,dc=com}
@@ -342,6 +343,8 @@ services:
         condition: service_started
     environment:
       - APP_ENV=prod
+      - AUTH_MODE=forwardauth
+      - ROOT_PATH=/api
       - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
       - POSTGRES_USER=${DECISION_POSTGRES_USER:-decision_user}
       - POSTGRES_PASSWORD=${DECISION_POSTGRES_PASSWORD:-change-me}
@@ -350,6 +353,12 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - JWT_SECRET=${DECISION_JWT_SECRET:-change-me}
+      - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - KEYCLOAK_BASE_URL=${DECISION_KEYCLOAK_BASE_URL:-http://keycloak:8080}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-familycloud}
+      - KEYCLOAK_SYNC_CLIENT_ID=${DECISION_KEYCLOAK_SYNC_CLIENT_ID:-decision-system-sync}
+      - KEYCLOAK_SYNC_CLIENT_SECRET=${DECISION_KEYCLOAK_SYNC_CLIENT_SECRET:-}
+      - KEYCLOAK_SYNC_GROUP_SUFFIX=${DECISION_KEYCLOAK_SYNC_GROUP_SUFFIX:-_family}
       - LLM_PROVIDER=${DECISION_LLM_PROVIDER:-mock}
       - LLM_MODEL=${DECISION_LLM_MODEL:-gpt-4.1-mini}
       - OPENAI_API_KEY=${DECISION_OPENAI_API_KEY:-}
@@ -359,6 +368,7 @@ services:
     networks:
       decisionnet:
         aliases: [api]
+      familynet: {}
 
   decision-worker:
     profiles: ["decision"]
@@ -368,6 +378,9 @@ services:
     depends_on:
       - decision-redis
       - decision-api
+    environment:
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
     networks:
       - decisionnet
     command: celery -A worker.celery_app worker --loglevel=INFO
@@ -380,6 +393,9 @@ services:
     depends_on:
       - decision-redis
       - decision-api
+    environment:
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
     networks:
       - decisionnet
     command: celery -A worker.celery_app beat --loglevel=INFO
