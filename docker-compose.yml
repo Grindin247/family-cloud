@@ -335,7 +335,17 @@ services:
   nats:
     image: nats:2.10-alpine
     profiles: ["decision"]
-    command: ["-js", "-sd", "/data"]
+    # Enable NATS server monitoring endpoint ("dashboard") on :8222
+    # Useful endpoints:
+    #   http://localhost:8222/           (landing)
+    #   http://localhost:8222/varz      (server stats)
+    #   http://localhost:8222/connz     (connections)
+    #   http://localhost:8222/routez    (routes)
+    #   http://localhost:8222/subsz     (subscriptions)
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"  # client connections
+      - "8222:8222"  # monitoring endpoint
     volumes:
       - nats_data:/data
     networks:
