@@ -213,3 +213,9 @@ __marimo__/
 # Local LDAP export artifacts
 backups/lldap/
 backup-users.db
+
+# Decision MCP server audit log (local)
+.decision_mcp_audit.jsonl
+
+# Never commit private keys
+certs/*.key

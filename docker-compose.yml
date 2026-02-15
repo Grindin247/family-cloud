@@ -307,7 +307,7 @@ services:
   # --- Decision system (optional profile) ---
   # Enable with: docker compose --profile decision up -d --build
   decision-db:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     profiles: ["decision"]
     environment:
       - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
@@ -332,14 +332,51 @@ services:
       decisionnet:
         aliases: [redis]
 
+  nats:
+    image: nats:2.10-alpine
+    profiles: ["decision"]
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats_data:/data
+    networks:
+      decisionnet:
+        aliases: [nats]
+      familynet: {}
+
+  decision-agent:
+    profiles: ["decision"]
+    build:
+      context: .
+      dockerfile: apps/decision-agent/Dockerfile
+    depends_on:
+      decision-api:
+        condition: service_started
+      nats:
+        condition: service_started
+    environment:
+      - APP_ENV=prod
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - NATS_URL=nats://nats:4222
+      - PYDANTIC_AI_MODEL=${PYDANTIC_AI_MODEL:-openai:gpt-4.1-mini}
+      - OPENAI_API_KEY=${DECISION_OPENAI_API_KEY:-}
+      - DECISION_THRESHOLD_1_TO_5=${DECISION_THRESHOLD_1_TO_5:-4.0}
+    ports:
+      - "8001:8000"
+    networks:
+      - decisionnet
+      - familynet
+
   decision-api:
     profiles: ["decision"]
     build:
-      context: ./apps/decision-system/apps/api
+      context: .
+      dockerfile: apps/decision-system/apps/api/Dockerfile
     depends_on:
       decision-db:
         condition: service_healthy
       decision-redis:
+        condition: service_started
+      nats:
         condition: service_started
     environment:
       - APP_ENV=prod
@@ -362,6 +399,8 @@ services:
       - LLM_PROVIDER=${DECISION_LLM_PROVIDER:-mock}
       - LLM_MODEL=${DECISION_LLM_MODEL:-gpt-4.1-mini}
       - OPENAI_API_KEY=${DECISION_OPENAI_API_KEY:-}
+      - PYDANTIC_AI_MODEL=${PYDANTIC_AI_MODEL:-openai:gpt-4.1-mini}
+      - DECISION_THRESHOLD_1_TO_5=${DECISION_THRESHOLD_1_TO_5:-4.0}
       - BUDGET_DEFAULT_QUARTERLY_ALLOCATION=${DECISION_BUDGET_DEFAULT_QUARTERLY_ALLOCATION:-100}
       - BUDGET_ROLLOVER_PERCENT=${DECISION_BUDGET_ROLLOVER_PERCENT:-0}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -373,8 +412,8 @@ services:
   decision-worker:
     profiles: ["decision"]
     build:
-      context: ./apps/decision-system/apps/worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/decision-system/apps/worker/Dockerfile
     depends_on:
       - decision-redis
       - decision-api
@@ -388,8 +427,8 @@ services:
   decision-beat:
     profiles: ["decision"]
     build:
-      context: ./apps/decision-system/apps/worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/decision-system/apps/worker/Dockerfile
     depends_on:
       - decision-redis
       - decision-api
@@ -433,6 +472,7 @@ volumes:
   vikunja_db:
   vikunja_files:
   decision_postgres_data:
+  nats_data:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.
   nextcloud_aio_mastercontainer:
     external: true
