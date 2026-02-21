@@ -21,12 +21,15 @@ class AgentSettings(BaseSettings):
     decision_api_base_url: str = "http://localhost:8000/v1"
 
     # PydanticAI / LLM
-    pydantic_ai_model: str = "openai:gpt-4.1-mini"
+    pydantic_ai_model: str = "openai:gpt-5.2"
 
     # Decision agent behavior
     decision_threshold_1_to_5: float = 4.0
     decision_max_followup_questions: int = 6
     decision_max_alignment_questions: int = 4
+    decision_agent_autonomous_mode: bool = True
+    decision_agent_shadow_mode: bool = False
+    decision_pending_confirmation_ttl_seconds: int = 3600
 
     # Timeouts/retries for tool calls
     http_timeout_seconds: float = 20.0

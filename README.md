@@ -100,6 +100,17 @@ docker compose --profile ops up -d
 docker compose --profile decision up -d --build
 ```
 
+### 6c) Observe decision-agent NATS events
+
+```bash
+scripts/decision_nats_observe.sh status
+scripts/decision_nats_observe.sh tail
+scripts/decision_nats_observe.sh replay
+scripts/decision_nats_observe.sh metrics
+```
+
+See the full runbook at `apps/decision-system/docs/runbooks/decision-agent-nats-observability.md`.
+
 ### 7) Create the first Vikunja admin user
 
 Vikunja requires registration enabled to create the first user.

@@ -20,6 +20,5 @@ def invoke(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     actor = (x_forwarded_user or x_dev_user or payload.actor).strip()
-    req = DecisionIntakeRequest(message=payload.message, actor=actor, family_id=payload.family_id)
+    req = DecisionIntakeRequest(message=payload.message, actor=actor, family_id=payload.family_id, session_id=payload.session_id)
     return DecisionAgent().run(req)
-
