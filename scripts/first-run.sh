@@ -166,8 +166,13 @@ say "Next steps"
 cat <<EOF
 1) Review .env: $ENV_FILE
 2) Start core services: docker compose up -d
-3) (Optional) Start task tracker: docker compose --profile ops up -d
-4) (Optional) Create first Vikunja admin user:
+3) (Optional) Configure Nextcloud MCP for files/notes:
+     - create secrets/nextcloud_mcp_username
+     - create secrets/nextcloud_mcp_app_password
+     - docker compose --profile agents up -d nextcloud-mcp
+     - see docs/runbooks/nextcloud-mcp-setup.md
+4) (Optional) Start task tracker: docker compose --profile ops up -d
+5) (Optional) Create first Vikunja admin user:
      - set VIKUNJA_ENABLE_REGISTRATION=true in .env
      - docker compose --profile ops up -d
      - ./scripts/vikunja-create-admin.sh

@@ -226,6 +226,106 @@ services:
       keycloak:
         condition: service_healthy
 
+  nextcloud-mcp:
+    image: family-cloud-nextcloud-mcp
+    build:
+      context: ./apps/nextcloud-mcp-overlay
+      dockerfile: Dockerfile
+      args:
+        NEXTCLOUD_MCP_BASE_IMAGE: ${NEXTCLOUD_MCP_BASE_IMAGE:-ghcr.io/cbcoutinho/nextcloud-mcp-server@sha256:a48f8f30bd7a5bc4d102e95ab0acca445a8969da460285926053805a83dbbf56}
+    container_name: nextcloud-mcp
+    profiles: ["agents"]
+    restart: unless-stopped
+    depends_on:
+      unstructured:
+        condition: service_started
+    environment:
+      - NEXTCLOUD_HOST=http://nextcloud-aio-apache:11000
+      - NEXTCLOUD_USERNAME_FILE=/run/secrets/nextcloud_mcp_username
+      - NEXTCLOUD_PASSWORD_FILE=/run/secrets/nextcloud_mcp_app_password
+      - NEXTCLOUD_MCP_SERVER_URL=${NEXTCLOUD_MCP_PUBLIC_URL:-http://nextcloud-mcp:8000}
+      - NEXTCLOUD_PUBLIC_ISSUER_URL=${NEXTCLOUD_MCP_PUBLIC_URL:-https://nextcloud.${FAMILY_DOMAIN}}
+      - NEXTCLOUD_MCP_TRANSPORT=${NEXTCLOUD_MCP_TRANSPORT:-streamable-http}
+      - NEXTCLOUD_MCP_AUTH_MODE=${NEXTCLOUD_MCP_AUTH_MODE:-basic}
+      - NEXTCLOUD_READY_TAG_NAME=${NEXTCLOUD_READY_TAG_NAME:-ready}
+      - ENABLE_DOCUMENT_PROCESSING=${NEXTCLOUD_MCP_ENABLE_DOCUMENT_PROCESSING:-true}
+      - DOCUMENT_PROCESSOR=${NEXTCLOUD_MCP_DOCUMENT_PROCESSOR:-unstructured}
+      - ENABLE_UNSTRUCTURED=${NEXTCLOUD_MCP_ENABLE_UNSTRUCTURED:-true}
+      - UNSTRUCTURED_API_URL=${NEXTCLOUD_MCP_UNSTRUCTURED_API_URL:-http://unstructured:8000}
+      - UNSTRUCTURED_TIMEOUT=${NEXTCLOUD_MCP_UNSTRUCTURED_TIMEOUT:-120}
+      - UNSTRUCTURED_STRATEGY=${NEXTCLOUD_MCP_UNSTRUCTURED_STRATEGY:-auto}
+      - UNSTRUCTURED_LANGUAGES=${NEXTCLOUD_MCP_UNSTRUCTURED_LANGUAGES:-eng}
+    volumes:
+      - nextcloud_mcp_data:/app/data
+      - ./secrets/nextcloud_mcp_username:/run/secrets/nextcloud_mcp_username:ro
+      - ./secrets/nextcloud_mcp_app_password:/run/secrets/nextcloud_mcp_app_password:ro
+    ports:
+      - "127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}:8000"
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  unstructured:
+    image: ${UNSTRUCTURED_IMAGE:-downloads.unstructured.io/unstructured-io/unstructured-api:latest}
+    container_name: unstructured
+    profiles: ["agents"]
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s = socket.create_connection(('127.0.0.1', 8000), 5); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  note-agent:
+    profiles: ["agents"]
+    build:
+      context: .
+      dockerfile: apps/note-agent/Dockerfile
+    depends_on:
+      nextcloud-mcp:
+        condition: service_healthy
+    environment:
+      - APP_ENV=prod
+      - NEXTCLOUD_MCP_URL=http://nextcloud-mcp:8000/mcp
+      - MCP_SERVER_URL=http://nextcloud-mcp:8000/mcp
+      - PYDANTIC_AI_MODEL=${PYDANTIC_AI_MODEL:-openai:gpt-5.2}
+      - OPENAI_API_KEY=${DECISION_OPENAI_API_KEY:-}
+      - NOTE_AGENT_ROOT=${NOTE_AGENT_ROOT:-/Notes/FamilyCloud}
+      - NOTE_AGENT_DROP_FOLDER=${NOTE_AGENT_DROP_FOLDER:-/Notes/FamilyCloud/Inbox/Drop}
+      - NOTE_AGENT_READY_TAG_NAME=${NEXTCLOUD_READY_TAG_NAME:-ready}
+      - NOTE_AGENT_AUTO_INGEST_READY_ENABLED=${NOTE_AGENT_AUTO_INGEST_READY_ENABLED:-false}
+      - NOTE_AGENT_AUTO_INGEST_INTERVAL_SECONDS=${NOTE_AGENT_AUTO_INGEST_INTERVAL_SECONDS:-60}
+      - NOTE_AGENT_AUTO_INGEST_ACTOR=${NOTE_AGENT_AUTO_INGEST_ACTOR:-}
+      - NOTE_AGENT_AUTO_INGEST_FAMILY_ID=${NOTE_AGENT_AUTO_INGEST_FAMILY_ID:-0}
+      - NOTE_AGENT_DRY_RUN=${NOTE_AGENT_DRY_RUN:-false}
+      - DEBUG=${NOTE_AGENT_DEBUG:-false}
+    ports:
+      - "127.0.0.1:${NOTE_AGENT_PORT:-8003}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
   # --- Agent task tracking (Kanban) ---
   # Vikunja: https://vikunja.io
   # Enable with: docker compose --profile ops up -d
@@ -481,6 +581,7 @@ volumes:
   keycloak_data:
   vikunja_db:
   vikunja_files:
+  nextcloud_mcp_data:
   decision_postgres_data:
   nats_data:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.

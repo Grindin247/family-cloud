@@ -1,0 +1,181 @@
+# Nextcloud MCP Setup
+
+This runbook integrates the upstream Nextcloud MCP server into FamilyCloud as an isolated container service for file and note access.
+FamilyCloud builds a small local overlay image on top of the upstream release to expose one additional MCP tool for ready-tag inbox ingestion.
+
+## Scope
+
+Phase 1 enables only:
+- Notes
+- WebDAV files
+
+Out of scope:
+- OAuth per-user auth
+- Calendar, contacts, deck, cookbook, tables
+- Semantic/vector search
+- Public internet exposure
+
+## Prerequisites
+
+- Core FamilyCloud services are running:
+
+```bash
+docker compose up -d
+```
+
+- Nextcloud is reachable at `https://nextcloud.${FAMILY_DOMAIN}`.
+- You can log into Nextcloud and create a dedicated MCP service user.
+- The service user has generated an app password in Nextcloud.
+
+## Secrets
+
+Create local secret files:
+
+```bash
+mkdir -p secrets
+printf '%s\n' '<nextcloud-username>' > secrets/nextcloud_mcp_username
+printf '%s\n' '<nextcloud-app-password>' > secrets/nextcloud_mcp_app_password
+chmod 600 secrets/nextcloud_mcp_username secrets/nextcloud_mcp_app_password
+```
+
+Do not put the app password in `.env`.
+
+## Environment
+
+Review these `.env` values:
+
+```env
+NEXTCLOUD_MCP_BASE_IMAGE=ghcr.io/cbcoutinho/nextcloud-mcp-server@sha256:a48f8f30bd7a5bc4d102e95ab0acca445a8969da460285926053805a83dbbf56
+NEXTCLOUD_MCP_PORT=8002
+NEXTCLOUD_MCP_TRANSPORT=streamable-http
+NEXTCLOUD_MCP_AUTH_MODE=basic
+NEXTCLOUD_MCP_PUBLIC_URL=
+NEXTCLOUD_READY_TAG_NAME=ready
+NEXTCLOUD_MCP_ENABLE_DOCUMENT_PROCESSING=true
+NEXTCLOUD_MCP_DOCUMENT_PROCESSOR=unstructured
+NEXTCLOUD_MCP_ENABLE_UNSTRUCTURED=true
+NEXTCLOUD_MCP_UNSTRUCTURED_API_URL=http://unstructured:8000
+NEXTCLOUD_MCP_UNSTRUCTURED_TIMEOUT=120
+NEXTCLOUD_MCP_UNSTRUCTURED_STRATEGY=auto
+NEXTCLOUD_MCP_UNSTRUCTURED_LANGUAGES=eng
+UNSTRUCTURED_IMAGE=downloads.unstructured.io/unstructured-io/unstructured-api:latest
+```
+
+Notes:
+- `NEXTCLOUD_MCP_PORT` is loopback-only host access for local tools and validation.
+- `NEXTCLOUD_MCP_PUBLIC_URL` should stay empty in phase 1 unless you intentionally expose the service through a reverse proxy.
+- The MCP service talks to Nextcloud over the shared Docker network using `http://nextcloud-aio-apache:11000`.
+
+## Start
+
+```bash
+docker compose --profile agents up -d --build unstructured nextcloud-mcp
+```
+
+Check status:
+
+```bash
+docker compose --profile agents ps nextcloud-mcp
+docker compose --profile agents ps unstructured
+docker compose --profile agents logs -f --tail=200 nextcloud-mcp
+```
+
+You should see an overlay registration log similar to:
+
+```text
+registered_custom_tool name=nc_webdav_list_ready_files
+```
+
+And document processor initialization instead of `Document processing disabled`.
+
+## Health Checks
+
+Readiness:
+
+```bash
+curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/health/ready
+```
+
+MCP endpoint:
+
+```bash
+curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp
+```
+
+If you need to verify DNS from the container network:
+
+```bash
+docker compose --profile agents exec nextcloud-mcp /app/.venv/bin/python -c "import socket; print(socket.gethostbyname('nextcloud.' + __import__('os').environ['FAMILY_DOMAIN']))"
+```
+
+## MCP Client Registration
+
+FamilyCloud now provides a shared MCP registration file:
+
+`infra/openclaw.mcp.json`
+
+Use the Nextcloud entry:
+- `nextcloud-files-notes-local`
+
+It points to:
+
+```text
+http://127.0.0.1:8002/mcp
+```
+
+If your MCP client expects explicit streamable HTTP configuration, use:
+
+```json
+{
+  "mcpServers": {
+    "nextcloud-files-notes": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8002/mcp"
+    }
+  }
+}
+```
+
+## Validation Scenarios
+
+Validate with an MCP-compatible client:
+- List notes.
+- Create a note.
+- Update that note.
+- List files in `/`.
+- Upload a small text file.
+- Read the file back.
+- Move the file.
+- Confirm invalid paths return structured errors.
+- Tag one file in `Inbox` with the Nextcloud tag `ready`.
+- Call `nc_webdav_list_ready_files` and confirm only tagged inbox files are returned.
+
+## Security Notes
+
+- The MCP service uses a dedicated shared Nextcloud user in phase 1.
+- Secrets are mounted from local files under `secrets/`.
+- The service is not exposed through Traefik in phase 1.
+- The host port binds to `127.0.0.1` only.
+- Destructive autonomous agent behavior is intentionally out of scope for this rollout.
+
+## Known Limitations
+
+- Per-user OAuth is deferred to Phase 2.
+- The upstream Nextcloud MCP server currently uses HTTP transports, not stdio.
+- The overlay depends on internal upstream Python module structure, so keep `NEXTCLOUD_MCP_BASE_IMAGE` pinned when upgrading.
+
+## Troubleshooting
+
+If the container starts but health checks fail:
+- confirm the Nextcloud URL resolves and the certificate is trusted inside the container path you are using
+- confirm the app password works through the Nextcloud web UI/API
+- inspect logs:
+
+```bash
+docker compose --profile agents logs --tail=200 nextcloud-mcp
+```
+
+If the MCP client cannot connect:
+- confirm the service is running on `127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}`
+- confirm your client supports `streamable-http`
+- confirm it is targeting `/mcp`, not `/sse`

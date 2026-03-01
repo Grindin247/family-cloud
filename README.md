@@ -94,13 +94,67 @@ After completing the Nextcloud AIO setup once at `https://nextcloudsetup.${FAMIL
 docker compose --profile ops up -d
 ```
 
-### 6b) (Optional) Start decision system
+### 6b) (Optional) Enable Nextcloud MCP for files/notes
+
+Create a dedicated Nextcloud user for AI file/note operations, generate an app password for that user, and store the credentials in local secret files:
+
+```bash
+mkdir -p secrets
+printf '%s\n' '<nextcloud-username>' > secrets/nextcloud_mcp_username
+printf '%s\n' '<nextcloud-app-password>' > secrets/nextcloud_mcp_app_password
+```
+
+Start the MCP service:
+
+```bash
+docker compose --profile agents up -d --build unstructured nextcloud-mcp
+```
+
+Validate it:
+
+```bash
+curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/health/ready
+curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp
+```
+
+The MCP container is built locally from the upstream image and adds one extra tool, `nc_webdav_list_ready_files`, for Nextcloud collaborative/system-tag discovery. It still talks to Nextcloud over the internal Docker network at `http://nextcloud-aio-apache:11000`, so it does not depend on the external self-signed TLS path for service-to-service traffic.
+Document parsing is enabled through a local `unstructured` container so Office and PDF files can be extracted upstream before note-agent fallback parsing is needed.
+
+See the full setup and security notes in `docs/runbooks/nextcloud-mcp-setup.md`.
+
+### 6c) (Optional) Start the note management agent
+
+```bash
+docker compose --profile agents up -d --build note-agent
+```
+
+Validate it:
+
+```bash
+curl http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/healthz
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User: you@example.com' \
+  -d '{"session_id":"notes-1","message":"Quick capture","actor":"you@example.com","family_id":1,"attachments":[]}' \
+  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/invoke
+
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User: you@example.com' \
+  -d '{"session_id":"ingest-1","actor":"you@example.com","family_id":1,"max_items":10}' \
+  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/ingest
+```
+
+Service-specific details live in `agents/note_agent/README.md`.
+Ready-ingest now processes only inbox files carrying the real Nextcloud `ready` tag.
+
+### 6d) (Optional) Start decision system
 
 ```bash
 docker compose --profile decision up -d --build
 ```
 
-### 6c) Observe decision-agent NATS events
+### 6e) Observe decision-agent NATS events
 
 ```bash
 scripts/decision_nats_observe.sh status
@@ -140,6 +194,8 @@ Once DNS + cert trust is set up:
 - Keycloak: `https://keycloak.${FAMILY_DOMAIN}`
 - Nextcloud AIO setup: `https://nextcloudsetup.${FAMILY_DOMAIN}`
 - Nextcloud (after setup): `https://nextcloud.${FAMILY_DOMAIN}`
+- Nextcloud MCP (local loopback only): `http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp`
+- Note agent (local loopback only): `http://127.0.0.1:${NOTE_AGENT_PORT:-8003}`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
 
