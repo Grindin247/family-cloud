@@ -4,8 +4,10 @@ Purpose:
 - capture note text and attachments from an upstream agent
 - file notes into Nextcloud using Inbox + PARA defaults
 - keep attachment uploads and note writes behind the Nextcloud MCP server
+- support AI best-match note retrieval for recall questions
 
 Environment:
+- `DECISION_API_BASE_URL`: internal decision-system API base URL used for note indexing/search, for Docker use `http://decision-api:8000/v1`
 - `NEXTCLOUD_MCP_URL` or `MCP_SERVER_URL`: streamable HTTP MCP endpoint, for Docker use `http://nextcloud-mcp:8000/mcp`
 - `NOTE_AGENT_ROOT`: root folder for managed notes, default `/Notes/FamilyCloud`
 - `NOTE_AGENT_DROP_FOLDER`: optional ingestion folder, default `/Notes/FamilyCloud/Inbox/Drop`
@@ -33,6 +35,14 @@ Ready-ingest rules:
 - polished notes include a `## Source` section with a link to the archived raw file
 - PDFs and parseable documents are classified from extracted text before filename fallback
 - image/document ingest falls back to filename and metadata when OCR/parsed text is weak
+- successful capture and ingest operations upsert searchable note documents into the decision-system note index
+
+Retrieval rules:
+- `POST /v1/agents/note/retrieve` accepts a natural-language query and returns ranked note matches
+- query interpretation resolves simple relative date phrases such as `last week`, `this week`, `today`, and `last month`
+- retrieval combines metadata filtering, lexical scoring, semantic scoring, and heuristic reranking
+- polished notes are preferred for answerability, but raw-note links are returned when available
+- retrieval indexing/search requires the decision-system API profile to be running
 
 Example:
 
@@ -63,6 +73,22 @@ curl -sS \
     "max_items":10
   }' \
   http://localhost:8003/v1/agents/note/ingest
+```
+
+Retrieval example:
+
+```bash
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User: mrjamescallender@gmail.com' \
+  -d '{
+    "actor":"mrjamescallender@gmail.com",
+    "family_id":2,
+    "query":"What did I learn in sunday service last week?",
+    "top_k":5,
+    "include_content":true
+  }' \
+  http://localhost:8003/v1/agents/note/retrieve
 ```
 
 Verify MCP connectivity:

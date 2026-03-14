@@ -1,0 +1,72 @@
+{
+  "mcpServers": {
+    "decision-system-local": {
+      "command": "python",
+      "args": [
+        "apps/decision-system/apps/mcp/server.py"
+      ],
+      "cwd": ".",
+      "env": {
+        "DECISION_API_BASE_URL": "http://localhost:8000/v1",
+        "DECISION_MCP_AUDIT_LOG_PATH": ".decision_mcp_audit.jsonl"
+      }
+    },
+    "decision-system-docker": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "--profile",
+        "agent",
+        "run",
+        "--rm",
+        "-T",
+        "mcp"
+      ],
+      "cwd": "apps/decision-system",
+      "env": {
+        "DECISION_API_BASE_URL": "http://api:8000/v1",
+        "DECISION_MCP_AUDIT_LOG_PATH": "/tmp/decision_mcp_audit.jsonl"
+      }
+    },
+    "nextcloud-files-notes-local": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8002/mcp"
+    },
+    "nextcloud-files-notes-docker": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8002/mcp"
+    },
+    "vikunja-local": {
+      "command": "uvx",
+      "args": [
+        "vikunja-mcp==0.9.3"
+      ],
+      "cwd": ".",
+      "env": {
+        "VIKUNJA_URL": "http://localhost:3456",
+        "VIKUNJA_TOKEN": ""
+      }
+    },
+    "vikunja-docker": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "--profile",
+        "ops",
+        "run",
+        "--rm",
+        "-T",
+        "vikunja-mcp"
+      ],
+      "cwd": ".",
+      "env": {
+        "VIKUNJA_MCP_URL": "http://vikunja:3456",
+        "VIKUNJA_MCP_PYPI_VERSION": "0.9.3"
+      }
+    }
+  }
+}

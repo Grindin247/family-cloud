@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field
 
 NoteStatus = Literal["ok", "needs_clarification", "error"]
 CreatedItemKind = Literal["note", "media", "folder"]
+CreatedItemRole = Literal["source", "archive", "polished", "attachment", "external_reference"]
 ParaCategory = Literal["Inbox", "Projects", "Areas", "Resources", "Archive"]
+RetrieveItemType = Literal["polished", "raw", "attachment"]
 
 
 class NoteAttachment(BaseModel):
@@ -38,6 +40,12 @@ class CreatedItem(BaseModel):
     path: str
     kind: CreatedItemKind
     url: str | None = None
+    role: CreatedItemRole | None = None
+    title: str | None = None
+    content_type: str | None = None
+    nextcloud_url: str | None = None
+    source_date: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class NoteAgentResponse(BaseModel):
@@ -57,6 +65,54 @@ class NoteIngestResponse(BaseModel):
     processed_count: int = 0
     skipped_count: int = 0
     cursor: str | None = None
+    debug: dict[str, Any] | None = None
+
+
+class NoteRetrieveRequest(BaseModel):
+    actor: str = Field(min_length=1)
+    family_id: int
+    session_id: str | None = None
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=10)
+    include_content: bool = True
+    include_raw_links: bool = True
+    preferred_item_types: list[RetrieveItemType] = Field(default_factory=list)
+    date_from: str | None = None
+    date_to: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievedNoteMatch(BaseModel):
+    path: str
+    item_type: RetrieveItemType
+    title: str | None = None
+    summary: str | None = None
+    excerpt: str | None = None
+    content: str | None = None
+    content_type: str | None = None
+    source_date: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    nextcloud_url: str | None = None
+    raw_note_url: str | None = None
+    related_paths: list[str] = Field(default_factory=list)
+    score: float
+    match_reasons: list[str] = Field(default_factory=list)
+
+
+class RetrieveInterpretation(BaseModel):
+    normalized_query: str
+    date_from: str | None = None
+    date_to: str | None = None
+    intent_tags: list[str] = Field(default_factory=list)
+    query_rewrite: str | None = None
+
+
+class NoteRetrieveResponse(BaseModel):
+    status: NoteStatus
+    summary: str
+    query_interpretation: RetrieveInterpretation | None = None
+    matches: list[RetrievedNoteMatch] = Field(default_factory=list)
+    actions_taken: list[str] = Field(default_factory=list)
     debug: dict[str, Any] | None = None
 
 

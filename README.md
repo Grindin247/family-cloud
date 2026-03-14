@@ -94,6 +94,26 @@ After completing the Nextcloud AIO setup once at `https://nextcloudsetup.${FAMIL
 docker compose --profile ops up -d
 ```
 
+### 6a) (Optional) Enable Vikunja MCP (stdio wrapper)
+
+Create a Vikunja API token in the Vikunja UI and store it in a local secret file:
+
+```bash
+mkdir -p secrets
+printf '%s\n' '<vikunja-api-token>' > secrets/vikunja_api_token
+```
+
+Build and run the MCP wrapper on demand:
+
+```bash
+docker compose --profile ops build vikunja-mcp
+docker compose --profile ops run --rm -T vikunja-mcp
+```
+
+MCP registration entries are provided in `infra/openclaw.mcp.json` as:
+- `vikunja-docker` (recommended)
+- `vikunja-local` (runs `uvx` locally)
+
 ### 6b) (Optional) Enable Nextcloud MCP for files/notes
 
 Create a dedicated Nextcloud user for AI file/note operations, generate an app password for that user, and store the credentials in local secret files:
@@ -143,16 +163,25 @@ curl -sS \
   -H 'X-Dev-User: you@example.com' \
   -d '{"session_id":"ingest-1","actor":"you@example.com","family_id":1,"max_items":10}' \
   http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/ingest
+
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User: you@example.com' \
+  -d '{"actor":"you@example.com","family_id":1,"query":"What did I learn in sunday service last week?","top_k":5,"include_content":true}' \
+  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/retrieve
 ```
 
 Service-specific details live in `agents/note_agent/README.md`.
 Ready-ingest now processes only inbox files carrying the real Nextcloud `ready` tag.
+Best-match retrieval now indexes note outputs into the decision-system Postgres backend for hybrid lexical and semantic search.
 
 ### 6d) (Optional) Start decision system
 
 ```bash
 docker compose --profile decision up -d --build
 ```
+
+Best-match note retrieval depends on the decision-system API being available because note indexing and search run against the shared Postgres backend.
 
 ### 6e) Observe decision-agent NATS events
 
@@ -164,6 +193,39 @@ scripts/decision_nats_observe.sh metrics
 ```
 
 See the full runbook at `apps/decision-system/docs/runbooks/decision-agent-nats-observability.md`.
+
+### 6f) (Optional) Start task management agent
+
+```bash
+docker compose --profile agents up -d --build task-agent
+```
+
+`task-agent` defaults to MCP-first tooling with REST fallback:
+- `TASK_AGENT_TOOLS_BACKEND=auto`
+- `TASK_AGENT_MCP_URL=http://vikunja-mcp-http:8000/mcp`
+- `TASK_AGENT_MCP_TIMEOUT_SECONDS=10`
+- `TASK_AGENT_DEFAULT_TIMEZONE=UTC`
+- `TASK_AGENT_ADVANCED_FEATURES_REQUIRE_CONFIRMATION=false`
+- `TASK_AGENT_RELATION_DEFAULT=relates_to`
+
+If you want a dedicated MCP HTTP runtime server, start:
+
+```bash
+docker compose --profile ops --profile agents up -d --build vikunja-mcp-http
+```
+
+Validate it:
+
+```bash
+curl http://127.0.0.1:${TASK_AGENT_PORT:-8005}/healthz
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User: you@example.com' \
+  -d '{"session_id":"tasks-1","message":"today I need to pick up the kids at 3pm then go to the market to pick up milk and eggs","actor":"you@example.com","family_id":1,"attachments":[],"metadata":{}}' \
+  http://127.0.0.1:${TASK_AGENT_PORT:-8005}/v1/agents/tasks/invoke
+```
+
+Service-specific details live in `agents/task_agent/README.md`.
 
 ### 7) Create the first Vikunja admin user
 
@@ -195,7 +257,10 @@ Once DNS + cert trust is set up:
 - Nextcloud AIO setup: `https://nextcloudsetup.${FAMILY_DOMAIN}`
 - Nextcloud (after setup): `https://nextcloud.${FAMILY_DOMAIN}`
 - Nextcloud MCP (local loopback only): `http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp`
+- Vikunja MCP: stdio server entries in `infra/openclaw.mcp.json` (`vikunja-docker` / `vikunja-local`)
+- Vikunja MCP HTTP (internal service endpoint): `http://vikunja-mcp-http:8000/mcp`
 - Note agent (local loopback only): `http://127.0.0.1:${NOTE_AGENT_PORT:-8003}`
+- Task agent (local loopback only): `http://127.0.0.1:${TASK_AGENT_PORT:-8005}`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
 

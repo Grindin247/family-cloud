@@ -7,6 +7,7 @@ from agents.common.settings import settings as common_settings
 
 
 class NoteAgentSettings(BaseSettings):
+    decision_api_base_url: str = common_settings.decision_api_base_url
     nextcloud_mcp_url: str = Field(
         default="http://127.0.0.1:8002/mcp",
         validation_alias=AliasChoices("NEXTCLOUD_MCP_URL", "MCP_SERVER_URL"),

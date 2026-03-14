@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import base64
 import email.utils
 import logging
@@ -16,7 +16,21 @@ from agents.common.observability.tracing import new_correlation_id
 from .ai import NoteAi
 from .document_extractors import can_extract_extension, extract_document_bytes
 from .pdf_understanding import assess_pdf_text_quality, pdf_page_count, render_pdf_pages, select_escalated_pages, select_initial_pages
-from .schemas import CreatedItem, IngestClassification, IngestSourceContext, NoteAgentResponse, NoteAttachment, NoteIngestRequest, NoteIngestResponse, NoteInvokeRequest
+from .retrieval_client import NoteRetrievalClient
+from .schemas import (
+    CreatedItem,
+    IngestClassification,
+    IngestSourceContext,
+    NoteAgentResponse,
+    NoteAttachment,
+    NoteIngestRequest,
+    NoteIngestResponse,
+    NoteInvokeRequest,
+    NoteRetrieveRequest,
+    NoteRetrieveResponse,
+    RetrieveInterpretation,
+    RetrievedNoteMatch,
+)
 from .settings import note_settings
 from .tools import NextcloudNotesTool, note_tools
 
@@ -120,11 +134,34 @@ def _nextcloud_files_app_url(path: str) -> str:
     return f"{base_url}/apps/files/?dir={encoded_dir}&relPath={encoded_rel_path}"
 
 
+def _extract_section(content: str, heading: str) -> str:
+    pattern = rf"^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
+    match = re.search(pattern, content, flags=re.MULTILINE | re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _extract_tags(content: str) -> list[str]:
+    match = re.search(r"^## Tags\s*\n(.+?)(?=^## |\Z)", content, flags=re.MULTILINE | re.DOTALL)
+    if not match:
+        match = re.search(r"^Tags:\s*(.+)$", content, flags=re.MULTILINE)
+    if not match:
+        return []
+    return [item.strip() for item in match.group(1).replace("\n", ",").split(",") if item.strip()]
+
+
+def _extract_raw_note_url(content: str) -> str | None:
+    match = re.search(r"\[.+?\]\((https?://[^)]+)\)", _extract_section(content, "Source"))
+    return match.group(1) if match else None
+
+
 @dataclass
 class NoteAgent:
     name: str = "note"
     ai: NoteAi | None = None
     tools: NextcloudNotesTool | None = None
+    retrieval_client: NoteRetrievalClient | None = None
     ingest_lock: Lock = field(default_factory=Lock)
 
     def run(self, req: NoteInvokeRequest) -> NoteAgentResponse:
@@ -225,6 +262,51 @@ class NoteAgent:
             )
         )
 
+    def retrieve(self, req: NoteRetrieveRequest) -> NoteRetrieveResponse:
+        request_id = new_correlation_id()
+        actor = req.actor.strip()
+        interpretation = self._interpret_query(req.query, date_from=req.date_from, date_to=req.date_to)
+        debug: dict[str, Any] | None = {"request_id": request_id, "query": req.query} if note_settings.debug else None
+        try:
+            payload = self._retrieval_client().search_notes(
+                actor=actor,
+                payload={
+                    "family_id": req.family_id,
+                    "actor": actor,
+                    "query": interpretation.query_rewrite or interpretation.normalized_query,
+                    "top_k": req.top_k,
+                    "date_from": interpretation.date_from,
+                    "date_to": interpretation.date_to,
+                    "preferred_item_types": req.preferred_item_types,
+                    "query_tags": interpretation.intent_tags,
+                    "include_content": req.include_content,
+                },
+            )
+        except Exception as exc:
+            logger.exception("note_agent_retrieve_failed error=%s", exc)
+            return NoteRetrieveResponse(
+                status="error",
+                summary=f"Note retrieval failed: {exc}",
+                query_interpretation=interpretation,
+                matches=[],
+                actions_taken=[],
+                debug=debug if note_settings.debug else None,
+            )
+
+        items = payload.get("items", [])
+        matches = [RetrievedNoteMatch.model_validate(item) for item in items if isinstance(item, dict)]
+        if not req.include_raw_links:
+            matches = [item.model_copy(update={"raw_note_url": None}) for item in matches]
+        summary = "No strong note matches found for query." if not matches else f"Found {len(matches)} note match(es) for the query."
+        return NoteRetrieveResponse(
+            status="ok",
+            summary=summary,
+            query_interpretation=interpretation,
+            matches=matches,
+            actions_taken=["Ran hybrid note retrieval search"] if matches else ["Ran hybrid note retrieval search with no strong matches"],
+            debug=debug if note_settings.debug else None,
+        )
+
     def _capture_note(
         self,
         *,
@@ -255,9 +337,6 @@ class NoteAgent:
             attachment_lines=attachment_lines,
             tools=tools,
         )
-        created_items.append(CreatedItem(path=source_path, kind="note"))
-        actions_taken.append("Recorded raw invoke source in Nextcloud")
-
         source_context = self._build_source_context(
             path=source_path,
             filename=posixpath.basename(source_path),
@@ -265,6 +344,18 @@ class NoteAgent:
             item={},
             source_read={"content": source_text, "content_type": "text/markdown"},
         )
+        created_items.append(
+            self._make_created_item(
+                path=source_path,
+                kind="note",
+                role="source",
+                title="Captured Invoke Source",
+                content_type="text/markdown",
+                source_date=source_context.source_date,
+                tags=[],
+            )
+        )
+        actions_taken.append("Recorded raw invoke source in Nextcloud")
         classification = self._analyze_ingested_source(source_context)
         if note_settings.debug and debug is not None:
             debug["plan"] = classification.model_dump()
@@ -275,7 +366,17 @@ class NoteAgent:
             classification=classification,
             tools=tools,
         )
-        created_items.append(CreatedItem(path=archive_path, kind="note"))
+        created_items.append(
+            self._make_created_item(
+                path=archive_path,
+                kind="note",
+                role="archive",
+                title=classification.title,
+                content_type="text/markdown",
+                source_date=classification.source_date or source_context.source_date,
+                tags=classification.tags,
+            )
+        )
         actions_taken.append("Archived raw invoke source file")
 
         polished_note_path = self._write_polished_ingest_note(
@@ -284,8 +385,32 @@ class NoteAgent:
             archive_path=archive_path,
             tools=tools,
         )
-        created_items.append(CreatedItem(path=polished_note_path, kind="note"))
+        created_items.append(
+            self._make_created_item(
+                path=polished_note_path,
+                kind="note",
+                role="polished",
+                title=classification.title,
+                content_type="text/markdown",
+                source_date=classification.source_date or source_context.source_date,
+                tags=classification.tags,
+            )
+        )
         actions_taken.append("Created polished markdown note in Nextcloud")
+        self._index_created_items(
+            actor=actor,
+            family_id=family_id,
+            session_id=session_id,
+            created_items=created_items,
+            source_context=source_context,
+            classification=classification,
+            polished_note_path=polished_note_path,
+            archive_path=archive_path,
+            source_text=source_text,
+            source_path=source_path,
+            actions_taken=actions_taken,
+            tools=tools,
+        )
 
         destination = classification.destination
         summary = f"Filed note '{classification.title}' to {destination}."
@@ -366,9 +491,14 @@ class NoteAgent:
             tools=tools,
         )
         created_items.append(
-            CreatedItem(
+            self._make_created_item(
                 path=archive_path,
                 kind="note" if self._is_textual(content_type, filename) else "media",
+                role="archive",
+                title=classification.title,
+                content_type=content_type or None,
+                source_date=classification.source_date or source_context.source_date,
+                tags=classification.tags,
             )
         )
         actions_taken.append("Archived raw source file")
@@ -379,13 +509,48 @@ class NoteAgent:
             archive_path=archive_path,
             tools=tools,
         )
-        created_items.append(CreatedItem(path=polished_note_path, kind="note"))
+        created_items.append(
+            self._make_created_item(
+                path=polished_note_path,
+                kind="note",
+                role="polished",
+                title=classification.title,
+                content_type="text/markdown",
+                source_date=classification.source_date or source_context.source_date,
+                tags=classification.tags,
+            )
+        )
         actions_taken.append("Created polished markdown note in Nextcloud")
         if not self._is_textual(content_type, filename):
-            created_items.append(CreatedItem(path=f"external://{filename}", kind="media", url=archive_path))
+            created_items.append(
+                self._make_created_item(
+                    path=f"external://{filename}",
+                    kind="media",
+                    role="external_reference",
+                    title=filename,
+                    content_type=content_type or None,
+                    url=archive_path,
+                    source_date=classification.source_date or source_context.source_date,
+                    tags=classification.tags,
+                )
+            )
             actions_taken.append(f"Referenced archived raw media {filename}")
         if classification.followups:
             actions_taken.extend(f"Follow-up needed: {item}" for item in classification.followups)
+        self._index_created_items(
+            actor=actor,
+            family_id=family_id,
+            session_id=session_id,
+            created_items=created_items,
+            source_context=source_context,
+            classification=classification,
+            polished_note_path=polished_note_path,
+            archive_path=archive_path,
+            source_text=source_context.raw_text,
+            source_path=path,
+            actions_taken=actions_taken,
+            tools=tools,
+        )
         return {"created_items": created_items, "actions_taken": actions_taken}
 
     def _read_ingest_source(self, *, path: str, filename: str, content_type: str, tools: NextcloudNotesTool) -> dict[str, Any]:
@@ -684,20 +849,20 @@ class NoteAgent:
         if attachment.bytes_base64:
             if note_settings.note_agent_dry_run:
                 return {
-                    "created_item": CreatedItem(path=f"{target_dir}/{filename}", kind="media"),
+                    "created_item": self._make_created_item(path=f"{target_dir}/{filename}", kind="media", role="attachment", title=filename, content_type=attachment.type),
                     "reference": f"{filename} (DRY_RUN)",
                     "actions": [f"DRY_RUN enabled; skipped upload for {filename}"],
                 }
             raw_bytes = base64.b64decode(attachment.bytes_base64)
             upload = tools.upload_media(raw_bytes, filename, destination=target_dir, content_type=attachment.type)
             return {
-                "created_item": CreatedItem(path=upload["path"], kind="media"),
+                "created_item": self._make_created_item(path=upload["path"], kind="media", role="attachment", title=filename, content_type=attachment.type),
                 "reference": upload["path"],
                 "actions": [f"Uploaded attachment {filename}"],
             }
         if attachment.url:
             return {
-                "created_item": CreatedItem(path=f"external://{filename}", kind="media", url=attachment.url),
+                "created_item": self._make_created_item(path=f"external://{filename}", kind="media", role="external_reference", title=filename, content_type=attachment.type, url=attachment.url),
                 "reference": f"{filename}: {attachment.url}",
                 "actions": [f"Referenced remote attachment {filename}"],
             }
@@ -706,6 +871,207 @@ class NoteAgent:
             "reference": f"{filename}: attachment had no bytes or URL",
             "actions": [f"Skipped empty attachment payload for {filename}"],
         }
+
+    def _retrieval_client(self) -> NoteRetrievalClient:
+        if self.retrieval_client is None:
+            self.retrieval_client = NoteRetrievalClient()
+        return self.retrieval_client
+
+    def _make_created_item(
+        self,
+        *,
+        path: str,
+        kind: str,
+        role: str | None,
+        title: str | None = None,
+        content_type: str | None = None,
+        url: str | None = None,
+        source_date: str | None = None,
+        tags: list[str] | None = None,
+    ) -> CreatedItem:
+        nextcloud_url = _nextcloud_files_app_url(path) if path.startswith("/") else None
+        return CreatedItem(
+            path=path,
+            kind=kind,  # type: ignore[arg-type]
+            url=url,
+            role=role,  # type: ignore[arg-type]
+            title=title,
+            content_type=content_type,
+            nextcloud_url=nextcloud_url,
+            source_date=source_date,
+            tags=tags or [],
+        )
+
+    def _index_created_items(
+        self,
+        *,
+        actor: str,
+        family_id: int,
+        session_id: str | None,
+        created_items: list[CreatedItem],
+        source_context: IngestSourceContext,
+        classification: IngestClassification,
+        polished_note_path: str,
+        archive_path: str,
+        source_text: str,
+        source_path: str,
+        actions_taken: list[str],
+        tools: NextcloudNotesTool,
+    ) -> None:
+        if note_settings.note_agent_dry_run:
+            return
+        related_paths = [item.path for item in created_items if item.path.startswith("/")]
+        for item in created_items:
+            if item.role is None:
+                continue
+            try:
+                payload = self._build_index_payload(
+                    actor=actor,
+                    family_id=family_id,
+                    session_id=session_id,
+                    created_item=item,
+                    source_context=source_context,
+                    classification=classification,
+                    polished_note_path=polished_note_path,
+                    archive_path=archive_path,
+                    source_text=source_text,
+                    source_path=source_path,
+                    related_paths=related_paths,
+                    tools=tools,
+                )
+                if payload is None:
+                    continue
+                self._retrieval_client().index_note(actor=actor, payload=payload)
+            except Exception as exc:
+                logger.warning("note_agent_index_failed path=%s error=%s", item.path, exc)
+                actions_taken.append(f"Retrieval indexing failed for {item.path}")
+
+    def _build_index_payload(
+        self,
+        *,
+        actor: str,
+        family_id: int,
+        session_id: str | None,
+        created_item: CreatedItem,
+        source_context: IngestSourceContext,
+        classification: IngestClassification,
+        polished_note_path: str,
+        archive_path: str,
+        source_text: str,
+        source_path: str,
+        related_paths: list[str],
+        tools: NextcloudNotesTool,
+    ) -> dict[str, Any] | None:
+        item_type = "attachment"
+        if created_item.role in {"polished"}:
+            item_type = "polished"
+        elif created_item.role in {"source", "archive"}:
+            item_type = "raw"
+        body_text: str | None = None
+        summary: str | None = None
+        excerpt_text: str | None = None
+        raw_note_url = _nextcloud_files_app_url(archive_path) if archive_path.startswith("/") else None
+        if created_item.role == "polished" and created_item.path.startswith("/"):
+            payload = tools.read(created_item.path)
+            body_text = str(payload.get("content") or payload.get("text") or "").strip()
+            summary = _extract_section(body_text, "Summary") or classification.summary
+            excerpt_text = _extract_section(body_text, "Key Points") or _extract_section(body_text, "Details") or summary
+            raw_note_url = _extract_raw_note_url(body_text) or raw_note_url
+        elif created_item.role == "source":
+            body_text = source_text
+            summary = None
+            excerpt_text = _extract_section(source_text, "Original Message") or source_text[:500]
+        elif created_item.role == "archive" and created_item.path.startswith("/"):
+            if created_item.kind == "note":
+                payload = tools.read(created_item.path)
+                body_text = str(payload.get("content") or payload.get("text") or "").strip()
+                summary = classification.summary
+                excerpt_text = body_text[:500]
+            elif source_context.raw_text.strip():
+                body_text = source_context.raw_text
+                summary = classification.summary
+                excerpt_text = source_context.raw_text[:500]
+        elif created_item.role == "attachment":
+            return None
+        elif created_item.role == "external_reference":
+            return None
+        metadata = {
+            "classification_method": classification.classification_method,
+            "source_path": source_path,
+            "collection_path": classification.collection_path,
+            "destination": classification.destination,
+        }
+        return {
+            "family_id": family_id,
+            "actor": actor,
+            "source_session_id": session_id,
+            "path": created_item.path,
+            "item_type": item_type,
+            "role": created_item.role,
+            "title": created_item.title or classification.title,
+            "summary": summary or classification.summary,
+            "body_text": body_text,
+            "excerpt_text": excerpt_text or classification.details[:500],
+            "content_type": created_item.content_type or source_context.mime_type or "text/markdown",
+            "source_date": created_item.source_date or classification.source_date or source_context.source_date,
+            "tags": created_item.tags or classification.tags,
+            "nextcloud_url": created_item.nextcloud_url,
+            "raw_note_url": raw_note_url,
+            "related_paths": [path for path in related_paths if path != created_item.path],
+            "metadata": metadata,
+        }
+
+    def _interpret_query(self, query: str, *, date_from: str | None, date_to: str | None) -> RetrieveInterpretation:
+        normalized = re.sub(r"\s+", " ", query).strip()
+        lowered = normalized.lower()
+        intent_tags: list[str] = []
+        if any(token in lowered for token in ("sunday service", "sermon", "church", "scripture", "prayer")):
+            intent_tags.append("church")
+        if any(token in lowered for token in ("budget", "expense", "spending")):
+            intent_tags.append("budget")
+        if any(token in lowered for token in ("homeschool", "curriculum", "school")):
+            intent_tags.append("school")
+        if any(token in lowered for token in ("contractor", "remodel", "permit")):
+            intent_tags.append("home")
+        resolved_from = date_from
+        resolved_to = date_to
+        today = datetime.now(timezone.utc).date()
+        if not resolved_from and not resolved_to:
+            if "today" in lowered:
+                resolved_from = resolved_to = today.isoformat()
+            elif "yesterday" in lowered:
+                yesterday = today - timedelta(days=1)
+                resolved_from = resolved_to = yesterday.isoformat()
+            elif "this week" in lowered:
+                week_start = today - timedelta(days=today.weekday())
+                resolved_from = week_start.isoformat()
+                resolved_to = today.isoformat()
+            elif "last week" in lowered:
+                this_week_start = today - timedelta(days=today.weekday())
+                last_week_start = this_week_start - timedelta(days=7)
+                last_week_end = this_week_start - timedelta(days=1)
+                resolved_from = last_week_start.isoformat()
+                resolved_to = last_week_end.isoformat()
+            elif "this month" in lowered:
+                month_start = today.replace(day=1)
+                resolved_from = month_start.isoformat()
+                resolved_to = today.isoformat()
+            elif "last month" in lowered:
+                this_month_start = today.replace(day=1)
+                last_month_end = this_month_start - timedelta(days=1)
+                last_month_start = last_month_end.replace(day=1)
+                resolved_from = last_month_start.isoformat()
+                resolved_to = last_month_end.isoformat()
+        rewrite = normalized
+        if intent_tags:
+            rewrite = f"{normalized} {' '.join(intent_tags)}".strip()
+        return RetrieveInterpretation(
+            normalized_query=normalized,
+            date_from=resolved_from,
+            date_to=resolved_to,
+            intent_tags=intent_tags,
+            query_rewrite=rewrite if rewrite != normalized else None,
+        )
 
     def _response(
         self,

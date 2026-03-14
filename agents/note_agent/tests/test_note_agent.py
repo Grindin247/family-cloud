@@ -16,7 +16,7 @@ from agents.note_agent.agent import NoteAgent
 from agents.note_agent import agent as note_agent_module
 from agents.note_agent.document_extractors import extract_document_bytes
 from agents.note_agent.pdf_understanding import assess_pdf_text_quality, select_escalated_pages, select_initial_pages
-from agents.note_agent.schemas import HealthStatus, IngestClassification, NoteFormattingPlan, NoteIngestRequest, NoteInvokeRequest
+from agents.note_agent.schemas import HealthStatus, IngestClassification, NoteFormattingPlan, NoteIngestRequest, NoteInvokeRequest, NoteRetrieveRequest
 
 _APP_MAIN_PATH = Path("/app/app/main.py")
 if not _APP_MAIN_PATH.exists():
@@ -143,6 +143,21 @@ class _FakeTools:
         return {"status_code": 201}
 
 
+@dataclass
+class _FakeRetrievalClient:
+    indexed_payloads: list[dict[str, Any]] = field(default_factory=list)
+    search_payloads: list[dict[str, Any]] = field(default_factory=list)
+    search_results: list[dict[str, Any]] = field(default_factory=list)
+
+    def index_note(self, *, payload: dict[str, Any], actor: str) -> dict[str, Any]:
+        self.indexed_payloads.append({"actor": actor, **payload})
+        return {"doc_id": "doc-1", "family_id": payload["family_id"], "path": payload["path"], "item_type": payload["item_type"], "updated_at": "2026-03-01T00:00:00Z"}
+
+    def search_notes(self, *, payload: dict[str, Any], actor: str) -> dict[str, Any]:
+        self.search_payloads.append({"actor": actor, **payload})
+        return {"items": list(self.search_results)}
+
+
 def test_note_agent_formats_and_files_note():
     tools = _FakeTools()
     ai = _FakeAi(
@@ -156,7 +171,7 @@ def test_note_agent_formats_and_files_note():
             confidence=0.9,
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
     response = agent.run(
         NoteInvokeRequest(
             session_id="notes-1",
@@ -188,6 +203,7 @@ def test_note_app_smoke(monkeypatch):
             )
         ),
         tools=tools,
+        retrieval_client=_FakeRetrievalClient(),
     )
 
     monkeypatch.setattr(_APP_MODULE, "note_tools", lambda: tools)
@@ -230,7 +246,7 @@ def test_invoke_records_raw_source_before_filing_polished_note():
             source_date="2026-03-01",
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
 
     response = agent.run(
         NoteInvokeRequest(
@@ -278,7 +294,7 @@ def test_ingest_only_processes_mcp_ready_inbox_text_files():
             confidence=0.9,
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
     response = agent.ingest(NoteIngestRequest(actor="u@example.com", family_id=2, session_id="ingest-1"))
     assert response.status == "ok"
     assert response.processed_count == 1
@@ -321,6 +337,7 @@ def test_ingest_ignores_filename_or_content_ready_heuristics_without_mcp_tag():
             )
         ),
         tools=tools,
+        retrieval_client=_FakeRetrievalClient(),
     )
 
     response = agent.ingest(NoteIngestRequest(actor="u@example.com", family_id=2, session_id="ingest-2"))
@@ -358,7 +375,7 @@ def test_media_ingest_uses_extracted_document_text_for_planning():
             confidence=0.88,
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
 
     response = agent.ingest(NoteIngestRequest(actor="u@example.com", family_id=2, session_id="ingest-3"))
     assert response.status == "ok"
@@ -403,7 +420,7 @@ def test_polished_ingest_note_uses_nextcloud_files_app_link(monkeypatch):
             source_date="2026-03-01",
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
 
     response = agent.ingest(NoteIngestRequest(actor="u@example.com", family_id=2, session_id="ingest-4"))
 
@@ -463,7 +480,7 @@ def test_scanned_pdf_uses_vision_fallback(monkeypatch):
             source_date="2025-09-19",
         )
     )
-    agent = NoteAgent(ai=ai, tools=tools)
+    agent = NoteAgent(ai=ai, tools=tools, retrieval_client=_FakeRetrievalClient())
 
     response = agent.ingest(NoteIngestRequest(actor="u@example.com", family_id=2, session_id="ingest-5"))
 
@@ -529,6 +546,7 @@ def test_note_app_ingest_smoke(monkeypatch):
             )
         ),
         tools=tools,
+        retrieval_client=_FakeRetrievalClient(),
     )
 
     monkeypatch.setattr(_APP_MODULE, "note_tools", lambda: tools)
@@ -550,3 +568,103 @@ def test_note_app_ingest_smoke(monkeypatch):
     body = ingest.json()
     assert body["status"] == "ok"
     assert body["processed_count"] == 0
+
+
+def test_retrieve_interprets_last_week_and_returns_matches():
+    retrieval_client = _FakeRetrievalClient(
+        search_results=[
+            {
+                "path": "/Notes/FamilyCloud/Areas/Church/2026-02-22-sunday-service.md",
+                "item_type": "polished",
+                "title": "Sunday Service",
+                "summary": "Notes from Sunday service.",
+                "excerpt": "We learned about faithful obedience.",
+                "content": "Full note body",
+                "content_type": "text/markdown",
+                "source_date": "2026-02-22",
+                "tags": ["church"],
+                "nextcloud_url": "https://nextcloud.family.callender/apps/files/?dir=/Notes/FamilyCloud/Areas/Church&relPath=2026-02-22-sunday-service.md",
+                "raw_note_url": "https://nextcloud.family.callender/apps/files/?dir=/Notes/FamilyCloud/Archive/Raw/Church/2026&relPath=2026-02-22-sunday-service-raw.md",
+                "related_paths": ["/Notes/FamilyCloud/Archive/Raw/Church/2026/2026-02-22-sunday-service-raw.md"],
+                "score": 0.91,
+                "match_reasons": ["Matched church/service terms in title and summary"],
+            }
+        ]
+    )
+    agent = NoteAgent(tools=_FakeTools(), retrieval_client=retrieval_client)
+
+    response = agent.retrieve(
+        NoteRetrieveRequest(
+            actor="u@example.com",
+            family_id=2,
+            query="What did I learn in sunday service last week?",
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.matches[0].title == "Sunday Service"
+    assert response.query_interpretation is not None
+    assert response.query_interpretation.intent_tags == ["church"]
+    assert response.query_interpretation.date_from is not None
+    assert response.query_interpretation.date_to is not None
+    sent = retrieval_client.search_payloads[0]
+    assert sent["date_from"] == response.query_interpretation.date_from
+    assert sent["date_to"] == response.query_interpretation.date_to
+
+
+def test_note_app_retrieve_smoke(monkeypatch):
+    tools = _FakeTools()
+    retrieval_client = _FakeRetrievalClient(
+        search_results=[
+            {
+                "path": "/Notes/FamilyCloud/Projects/2026-03-01-kitchen-remodel.md",
+                "item_type": "polished",
+                "title": "Kitchen remodel",
+                "summary": "Met with contractor.",
+                "excerpt": "Need estimate and permit check.",
+                "content": "Need estimate and permit check.",
+                "content_type": "text/markdown",
+                "source_date": "2026-03-01",
+                "tags": ["projects"],
+                "nextcloud_url": "https://nextcloud.family.callender/apps/files/?dir=/Notes/FamilyCloud/Projects&relPath=2026-03-01-kitchen-remodel.md",
+                "raw_note_url": "https://nextcloud.family.callender/apps/files/?dir=/Notes/FamilyCloud/Archive/Raw/2026&relPath=2026-03-01-kitchen-remodel-raw.md",
+                "related_paths": [],
+                "score": 0.88,
+                "match_reasons": ["Matched title terms"],
+            }
+        ]
+    )
+    agent = NoteAgent(
+        ai=_FakeAi(
+            NoteFormattingPlan(
+                title="Captured note",
+                summary="Short summary",
+                details="Full details",
+                action_items=[],
+                tags=["inbox"],
+                destination="Inbox",
+                confidence=0.4,
+            )
+        ),
+        tools=tools,
+        retrieval_client=retrieval_client,
+    )
+
+    monkeypatch.setattr(_APP_MODULE, "note_tools", lambda: tools)
+    monkeypatch.setattr(_APP_MODULE, "get_note_tools", lambda: tools)
+    monkeypatch.setattr(_APP_MODULE, "get_note_agent", lambda: agent)
+
+    client = TestClient(app)
+    retrieve = client.post(
+        "/v1/agents/note/retrieve",
+        headers={"X-Dev-User": "u@example.com"},
+        json={
+            "actor": "u@example.com",
+            "family_id": 2,
+            "query": "Find my kitchen remodel estimate notes",
+        },
+    )
+    assert retrieve.status_code == 200
+    body = retrieve.json()
+    assert body["status"] == "ok"
+    assert body["matches"][0]["title"] == "Kitchen remodel"

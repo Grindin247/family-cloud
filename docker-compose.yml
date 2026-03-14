@@ -300,6 +300,7 @@ services:
         condition: service_healthy
     environment:
       - APP_ENV=prod
+      - DECISION_API_BASE_URL=${NOTE_AGENT_DECISION_API_BASE_URL:-http://decision-api:8000/v1}
       - NEXTCLOUD_MCP_URL=http://nextcloud-mcp:8000/mcp
       - MCP_SERVER_URL=http://nextcloud-mcp:8000/mcp
       - PYDANTIC_AI_MODEL=${PYDANTIC_AI_MODEL:-openai:gpt-5.2}
@@ -315,6 +316,42 @@ services:
       - DEBUG=${NOTE_AGENT_DEBUG:-false}
     ports:
       - "127.0.0.1:${NOTE_AGENT_PORT:-8003}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  task-agent:
+    profiles: ["agents"]
+    build:
+      context: .
+      dockerfile: apps/task-agent/Dockerfile
+    environment:
+      - APP_ENV=prod
+      - PYDANTIC_AI_MODEL=${PYDANTIC_AI_MODEL:-openai:gpt-5.2}
+      - OPENAI_API_KEY=${DECISION_OPENAI_API_KEY:-}
+      - TASK_AGENT_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
+      - TASK_AGENT_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
+      - TASK_AGENT_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
+      - TASK_AGENT_TOOLS_BACKEND=${TASK_AGENT_TOOLS_BACKEND:-auto}
+      - TASK_AGENT_MCP_URL=${TASK_AGENT_MCP_URL:-http://vikunja-mcp-http:8000/mcp}
+      - TASK_AGENT_MCP_TIMEOUT_SECONDS=${TASK_AGENT_MCP_TIMEOUT_SECONDS:-10}
+      - TASK_AGENT_PROJECT_AUTOCREATE_CLUSTER_CONFIDENCE=${TASK_AGENT_PROJECT_AUTOCREATE_CLUSTER_CONFIDENCE:-0.86}
+      - TASK_AGENT_PROJECT_AUTOCREATE_MIN_TASKS=${TASK_AGENT_PROJECT_AUTOCREATE_MIN_TASKS:-3}
+      - TASK_AGENT_PROJECT_EXISTING_SIMILARITY_THRESHOLD=${TASK_AGENT_PROJECT_EXISTING_SIMILARITY_THRESHOLD:-0.72}
+      - TASK_AGENT_RECONCILE_AUTOCOMPLETE_THRESHOLD=${TASK_AGENT_RECONCILE_AUTOCOMPLETE_THRESHOLD:-0.78}
+      - TASK_AGENT_RECONCILE_AMBIGUOUS_THRESHOLD=${TASK_AGENT_RECONCILE_AMBIGUOUS_THRESHOLD:-0.55}
+      - DEBUG=${TASK_AGENT_DEBUG:-false}
+    volumes:
+      - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+    ports:
+      - "127.0.0.1:${TASK_AGENT_PORT:-8005}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
       interval: 15s
@@ -399,6 +436,54 @@ services:
       - "traefik.http.routers.tasks.entrypoints=websecure"
       - "traefik.http.routers.tasks.tls=true"
       - "traefik.http.services.tasks.loadbalancer.server.port=3456"
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  vikunja-mcp:
+    image: family-cloud-vikunja-mcp-wrapper
+    build:
+      context: ./apps/vikunja-mcp-wrapper
+      dockerfile: Dockerfile
+      args:
+        VIKUNJA_MCP_PYPI_VERSION: ${VIKUNJA_MCP_PYPI_VERSION:-0.9.3}
+    container_name: vikunja-mcp
+    profiles: ["ops"]
+    depends_on:
+      vikunja:
+        condition: service_started
+    environment:
+      - VIKUNJA_URL=${VIKUNJA_MCP_URL:-http://vikunja:3456}
+      - VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
+    volumes:
+      - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+    networks:
+      - familynet
+    dns:
+      - 172.20.0.11
+
+  vikunja-mcp-http:
+    image: family-cloud-vikunja-mcp-wrapper
+    build:
+      context: ./apps/vikunja-mcp-wrapper
+      dockerfile: Dockerfile
+      args:
+        VIKUNJA_MCP_PYPI_VERSION: ${VIKUNJA_MCP_PYPI_VERSION:-0.9.3}
+    container_name: vikunja-mcp-http
+    profiles: ["ops", "agents"]
+    depends_on:
+      vikunja:
+        condition: service_started
+    command:
+      - python
+      - -c
+      - "from vikunja_mcp.server import mcp; mcp.run(transport='streamable-http', host='0.0.0.0', port=8000)"
+    environment:
+      - VIKUNJA_URL=${VIKUNJA_MCP_URL:-http://vikunja:3456}
+      - VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
+    volumes:
+      - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
     networks:
       - familynet
     dns:

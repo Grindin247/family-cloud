@@ -9,7 +9,15 @@ from fastapi import FastAPI, Header
 from agents.common.observability.log_filter import CorrelationIdFilter
 from agents.common.observability.logging import configure_logging
 from agents.note_agent.agent import NoteAgent
-from agents.note_agent.schemas import HealthStatus, NoteAgentResponse, NoteIngestRequest, NoteIngestResponse, NoteInvokeRequest
+from agents.note_agent.schemas import (
+    HealthStatus,
+    NoteAgentResponse,
+    NoteIngestRequest,
+    NoteIngestResponse,
+    NoteInvokeRequest,
+    NoteRetrieveRequest,
+    NoteRetrieveResponse,
+)
 from agents.note_agent.settings import note_settings
 from agents.note_agent.tools import NextcloudNotesTool, note_tools
 
@@ -103,3 +111,14 @@ def ingest(
     actor = (x_forwarded_user or x_dev_user or payload.actor).strip()
     req = payload.model_copy(update={"actor": actor})
     return get_note_agent().ingest(req)
+
+
+@app.post("/v1/agents/note/retrieve", response_model=NoteRetrieveResponse)
+def retrieve(
+    payload: NoteRetrieveRequest,
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    actor = (x_forwarded_user or x_dev_user or payload.actor).strip()
+    req = payload.model_copy(update={"actor": actor})
+    return get_note_agent().retrieve(req)
