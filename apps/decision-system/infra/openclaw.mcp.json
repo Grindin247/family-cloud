@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "decision-system-local": {
+      "command": "python",
+      "args": [
+        "apps/mcp/server.py"
+      ],
+      "cwd": ".",
+      "env": {
+        "DECISION_API_BASE_URL": "http://localhost:8000/v1",
+        "DECISION_MCP_AUDIT_LOG_PATH": ".decision_mcp_audit.jsonl"
+      }
+    },
+    "decision-system-docker": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "--profile",
+        "agent",
+        "run",
+        "--rm",
+        "-T",
+        "mcp"
+      ],
+      "cwd": ".",
+      "env": {
+        "DECISION_API_BASE_URL": "http://api:8000/v1",
+        "DECISION_MCP_AUDIT_LOG_PATH": "/tmp/decision_mcp_audit.jsonl"
+      }
+    }
+  }
+}

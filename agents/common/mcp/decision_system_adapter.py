@@ -5,9 +5,9 @@ from threading import Lock
 from uuid import uuid4
 from typing import Any, Literal
 
+from agents.common.decision_types import OperationType, PlannedOperation
 from agents.common.mcp.client import HttpToolClient
 from agents.common.settings import settings
-from agents.decision_agent.schemas import OperationType, PlannedOperation
 
 
 ProposalStatus = Literal["proposed", "confirmed", "committed", "canceled"]
@@ -205,11 +205,124 @@ class DecisionSystemTools:
     def get_budget_summary(self, family_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
         return self.http.request("GET", f"/budgets/families/{family_id}", headers=self._headers(actor_email)).result
 
+    def get_decision(self, decision_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request("GET", f"/decisions/{decision_id}", headers=self._headers(actor_email)).result
+
+    def get_goal(self, goal_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request("GET", f"/goals/{goal_id}", headers=self._headers(actor_email)).result
+
+    def get_family_dna(self, family_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request("GET", f"/family/{family_id}/dna", headers=self._headers(actor_email)).result
+
     def write_memory(self, family_id: int, type: str, text: str, *, actor_email: str | None = None) -> dict[str, Any]:
         return self.http.request(
             "POST",
             f"/family/{family_id}/memory/documents",
             json_body={"family_id": family_id, "type": type, "text": text, "source_refs": []},
+            headers=self._headers(actor_email),
+        ).result
+
+    def search_memory(self, family_id: int, query: str, *, top_k: int = 5, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/memory/search",
+            json_body={"query": query, "top_k": top_k},
+            headers=self._headers(actor_email),
+        ).result
+
+    def search_notes(self, family_id: int, query: str, *, top_k: int = 5, include_content: bool = True, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            "/notes/search",
+            json_body={
+                "family_id": family_id,
+                "actor": actor_email or "system",
+                "query": query,
+                "top_k": top_k,
+                "include_content": include_content,
+            },
+            headers=self._headers(actor_email),
+        ).result
+
+    def index_file_document(
+        self,
+        family_id: int,
+        path: str,
+        item_type: str,
+        role: str,
+        *,
+        actor_email: str | None = None,
+        source_session_id: str | None = None,
+        name: str | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        body_text: str | None = None,
+        excerpt_text: str | None = None,
+        content_type: str | None = None,
+        media_kind: str | None = None,
+        source_date: str | None = None,
+        size_bytes: int | None = None,
+        etag: str | None = None,
+        file_id: str | None = None,
+        is_directory: bool = False,
+        tags: list[str] | None = None,
+        nextcloud_url: str | None = None,
+        related_paths: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            "/files/index",
+            json_body={
+                "family_id": family_id,
+                "actor": actor_email or "system",
+                "source_session_id": source_session_id,
+                "path": path,
+                "name": name,
+                "item_type": item_type,
+                "role": role,
+                "title": title,
+                "summary": summary,
+                "body_text": body_text,
+                "excerpt_text": excerpt_text,
+                "content_type": content_type,
+                "media_kind": media_kind,
+                "source_date": source_date,
+                "size_bytes": size_bytes,
+                "etag": etag,
+                "file_id": file_id,
+                "is_directory": is_directory,
+                "tags": tags or [],
+                "nextcloud_url": nextcloud_url,
+                "related_paths": related_paths or [],
+                "metadata": metadata or {},
+            },
+            headers=self._headers(actor_email),
+        ).result
+
+    def search_files(
+        self,
+        family_id: int,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_content: bool = True,
+        preferred_item_types: list[str] | None = None,
+        content_types: list[str] | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            "/files/search",
+            json_body={
+                "family_id": family_id,
+                "actor": actor_email or "system",
+                "query": query,
+                "top_k": top_k,
+                "include_content": include_content,
+                "preferred_item_types": preferred_item_types or [],
+                "content_types": content_types or [],
+            },
             headers=self._headers(actor_email),
         ).result
 
@@ -248,6 +361,214 @@ class DecisionSystemTools:
             self.http.request("DELETE", f"/family/{family_id}/agents/{agent_name}/sessions/{session_id}", headers=self._headers(actor_email))
         except Exception:
             return
+
+    def create_agent_question(
+        self,
+        family_id: int,
+        *,
+        domain: str,
+        source_agent: str,
+        topic: str,
+        summary: str,
+        prompt: str,
+        urgency: str,
+        topic_type: str,
+        dedupe_key: str,
+        context: dict[str, Any] | None = None,
+        artifact_refs: list[dict[str, Any]] | None = None,
+        due_at: str | None = None,
+        expires_at: str | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/questions",
+            json_body={
+                "domain": domain,
+                "source_agent": source_agent,
+                "topic": topic,
+                "summary": summary,
+                "prompt": prompt,
+                "urgency": urgency,
+                "topic_type": topic_type,
+                "dedupe_key": dedupe_key,
+                "context": context or {},
+                "artifact_refs": artifact_refs or [],
+                "due_at": due_at,
+                "expires_at": expires_at,
+            },
+            headers=self._headers(actor_email),
+        ).result
+
+    def list_agent_questions(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        status: str | None = None,
+        include_inactive: bool = False,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"include_inactive": include_inactive}
+        if domain is not None:
+            params["domain"] = domain
+        if status is not None:
+            params["status"] = status
+        return self.http.request(
+            "GET",
+            f"/family/{family_id}/ops/questions",
+            params=params,
+            headers=self._headers(actor_email),
+        ).result["items"]
+
+    def update_agent_question(
+        self,
+        family_id: int,
+        question_id: str,
+        *,
+        status: str | None = None,
+        summary: str | None = None,
+        prompt: str | None = None,
+        answer_sufficiency_state: str | None = None,
+        context_patch: dict[str, Any] | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"context_patch": context_patch or {}}
+        if status is not None:
+            body["status"] = status
+        if summary is not None:
+            body["summary"] = summary
+        if prompt is not None:
+            body["prompt"] = prompt
+        if answer_sufficiency_state is not None:
+            body["answer_sufficiency_state"] = answer_sufficiency_state
+        return self.http.request(
+            "PATCH",
+            f"/family/{family_id}/ops/questions/{question_id}",
+            json_body=body,
+            headers=self._headers(actor_email),
+        ).result
+
+    def mark_agent_question_asked(
+        self,
+        family_id: int,
+        question_id: str,
+        *,
+        delivery_agent: str,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/questions/{question_id}/asked",
+            json_body={"delivery_agent": delivery_agent, "delivery_context": {}},
+            headers=self._headers(actor_email),
+        ).result
+
+    def resolve_agent_question(
+        self,
+        family_id: int,
+        question_id: str,
+        *,
+        status: str = "resolved",
+        resolution_note: str | None = None,
+        answer_sufficiency_state: str | None = None,
+        context_patch: dict[str, Any] | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"status": status, "context_patch": context_patch or {}}
+        if resolution_note is not None:
+            body["resolution_note"] = resolution_note
+        if answer_sufficiency_state is not None:
+            body["answer_sufficiency_state"] = answer_sufficiency_state
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/questions/{question_id}/resolve",
+            json_body=body,
+            headers=self._headers(actor_email),
+        ).result
+
+    def record_agent_event(
+        self,
+        family_id: int,
+        *,
+        domain: str,
+        source_agent: str,
+        event_type: str,
+        summary: str,
+        topic: str | None = None,
+        status: str | None = None,
+        value_number: float | None = None,
+        payload: dict[str, Any] | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "domain": domain,
+            "source_agent": source_agent,
+            "event_type": event_type,
+            "summary": summary,
+            "payload": payload or {},
+        }
+        if topic is not None:
+            body["topic"] = topic
+        if status is not None:
+            body["status"] = status
+        if value_number is not None:
+            body["value_number"] = value_number
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/events",
+            json_body=body,
+            headers=self._headers(actor_email),
+        ).result
+
+    def query_agent_metrics(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        metric_keys: list[str] | None = None,
+        start_at: str | None = None,
+        end_at: str | None = None,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {"metric_keys": metric_keys or []}
+        if domain is not None:
+            body["domain"] = domain
+        if start_at is not None:
+            body["start_at"] = start_at
+        if end_at is not None:
+            body["end_at"] = end_at
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/metrics/query",
+            json_body=body,
+            headers=self._headers(actor_email),
+        ).result["items"]
+
+    def get_playback_timeline(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        event_types: list[str] | None = None,
+        start_at: str | None = None,
+        end_at: str | None = None,
+        limit: int = 100,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {"event_types": event_types or [], "limit": limit}
+        if domain is not None:
+            body["domain"] = domain
+        if start_at is not None:
+            body["start_at"] = start_at
+        if end_at is not None:
+            body["end_at"] = end_at
+        return self.http.request(
+            "POST",
+            f"/family/{family_id}/ops/playback/query",
+            json_body=body,
+            headers=self._headers(actor_email),
+        ).result["items"]
 
     def propose_changes(
         self,

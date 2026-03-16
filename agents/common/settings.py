@@ -20,9 +20,6 @@ class AgentSettings(BaseSettings):
     # Decision system API (when using HTTP adapter instead of MCP transport)
     decision_api_base_url: str = "http://localhost:8000/v1"
 
-    # PydanticAI / LLM
-    pydantic_ai_model: str = "openai:gpt-5.2"
-
     # Decision agent behavior
     decision_threshold_1_to_5: float = 4.0
     decision_max_followup_questions: int = 6

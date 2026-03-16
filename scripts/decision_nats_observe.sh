@@ -8,7 +8,7 @@ COUNT="${NATS_REPLAY_COUNT:-50}"
 
 usage() {
   cat <<'EOF'
-Observe Decision Agent events and NATS telemetry.
+Observe Family Cloud decision-domain events and NATS telemetry.
 
 Usage:
   scripts/decision_nats_observe.sh status
@@ -84,15 +84,15 @@ cmd_replay() {
     return
   fi
 
-  local agent_container
-  agent_container="$(docker compose --profile decision ps -q decision-agent | head -n 1)"
-  if [ -z "${agent_container}" ]; then
-    echo "Replay fallback failed: decision-agent container is not running." >&2
+  local api_container
+  api_container="$(docker compose --profile decision ps -q decision-api | head -n 1)"
+  if [ -z "${api_container}" ]; then
+    echo "Replay fallback failed: decision-api container is not running." >&2
     echo "Either start it with 'docker compose --profile decision up -d --build' or install nats-py locally." >&2
     exit 1
   fi
 
-  docker exec -i "${agent_container}" python - "$subject" "$count" <<'PY'
+  docker exec -i "${api_container}" python - "$subject" "$count" <<'PY'
 import asyncio
 import json
 import sys

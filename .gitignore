@@ -219,3 +219,4 @@ backup-users.db
 
 # Never commit private keys
 certs/*.key
+.venv-test/

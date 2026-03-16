@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from agents.common.decision_types import PlannedOperation
 from agents.common.mcp.decision_system_adapter import _to_plan
 from agents.common.settings import settings
-from agents.decision_agent.schemas import PlannedOperation
 
 
 def test_score_decision_aliases_and_default_threshold():

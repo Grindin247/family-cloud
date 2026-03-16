@@ -1,3 +1,0 @@
-[submodule "apps/decision-system"]
-	path = apps/decision-system
-	url = git@github.com:Grindin247/decision-system.git

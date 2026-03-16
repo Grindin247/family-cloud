@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.next/
+.env
+dist/
+coverage/
+.pytest_cache/
+.decision_mcp_audit.jsonl

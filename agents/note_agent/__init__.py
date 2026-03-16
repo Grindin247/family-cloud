@@ -1,1 +1,0 @@
-"""Note management agent package."""

@@ -1,0 +1,163 @@
+openapi: 3.1.0
+info:
+  title: Family Decision System API
+  version: 1.1.0
+servers:
+  - url: /v1
+paths:
+  /families:
+    get:
+      summary: List families
+      responses:
+        '200': { description: Family list }
+    post:
+      summary: Create family
+      responses:
+        '201': { description: Family created }
+
+  /families/{familyId}:
+    get:
+      summary: Get family
+      parameters:
+        - in: path
+          name: familyId
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: Family }
+    patch:
+      summary: Update family
+      responses:
+        '200': { description: Family updated }
+    delete:
+      summary: Delete family
+      responses:
+        '204': { description: Family deleted }
+
+  /families/{familyId}/members:
+    get:
+      summary: List family members
+      responses:
+        '200': { description: Member list }
+    post:
+      summary: Create family member
+      responses:
+        '201': { description: Member created }
+
+  /families/{familyId}/members/{memberId}:
+    get:
+      summary: Get family member
+      responses:
+        '200': { description: Member }
+    patch:
+      summary: Update family member
+      responses:
+        '200': { description: Member updated }
+    delete:
+      summary: Delete family member
+      responses:
+        '204': { description: Member deleted }
+
+  /goals:
+    get:
+      summary: List goals
+      responses:
+        '200': { description: Goal list }
+    post:
+      summary: Create goal
+      responses:
+        '201': { description: Goal created }
+
+  /goals/{goalId}:
+    get:
+      summary: Get goal
+      responses:
+        '200': { description: Goal }
+    patch:
+      summary: Update goal
+      responses:
+        '200': { description: Goal updated }
+    delete:
+      summary: Delete goal
+      responses:
+        '204': { description: Goal deleted }
+
+  /decisions:
+    get:
+      summary: List decisions
+      responses:
+        '200': { description: Decision list }
+    post:
+      summary: Create decision
+      responses:
+        '201': { description: Decision created }
+
+  /decisions/{decisionId}:
+    get:
+      summary: Get decision (with score summary)
+      responses:
+        '200': { description: Decision }
+    patch:
+      summary: Update decision
+      responses:
+        '200': { description: Decision updated }
+    delete:
+      summary: Delete decision
+      responses:
+        '204': { description: Decision deleted }
+
+  /decisions/{decisionId}/score:
+    post:
+      summary: Submit per-goal score set and route by threshold
+      responses:
+        '200': { description: Score accepted and routed }
+
+  /decisions/{decisionId}/queue:
+    post:
+      summary: Force queue insertion
+      responses:
+        '200': { description: Decision queued }
+
+  /decisions/{decisionId}/status:
+    post:
+      summary: Update decision status
+      responses:
+        '200': { description: Status updated }
+
+  /roadmap:
+    get:
+      summary: List roadmap items
+      responses:
+        '200': { description: Roadmap list }
+    post:
+      summary: Create roadmap item
+      responses:
+        '201': { description: Roadmap item created }
+
+  /roadmap/{roadmapId}:
+    patch:
+      summary: Update roadmap item
+      responses:
+        '200': { description: Roadmap updated }
+    delete:
+      summary: Delete roadmap item
+      responses:
+        '204': { description: Roadmap deleted }
+
+  /budgets/ledger:
+    get:
+      summary: Get budget ledger
+      responses:
+        '200': { description: Ledger list }
+
+  /budgets/periods/rollover:
+    post:
+      summary: Trigger period rollover
+      responses:
+        '202': { description: Rollover accepted }
+
+  /audit:
+    get:
+      summary: Read audit log
+      responses:
+        '200': { description: Audit list }

@@ -51,7 +51,7 @@ docker compose version
 ### 2) Clone repo
 
 ```bash
-git clone --recurse-submodules https://github.com/Grindin247/family-cloud.git
+git clone https://github.com/Grindin247/family-cloud.git
 cd family-cloud
 ```
 
@@ -138,52 +138,17 @@ curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp
 ```
 
 The MCP container is built locally from the upstream image and adds one extra tool, `nc_webdav_list_ready_files`, for Nextcloud collaborative/system-tag discovery. It still talks to Nextcloud over the internal Docker network at `http://nextcloud-aio-apache:11000`, so it does not depend on the external self-signed TLS path for service-to-service traffic.
-Document parsing is enabled through a local `unstructured` container so Office and PDF files can be extracted upstream before note-agent fallback parsing is needed.
+Document parsing is enabled through a local `unstructured` container so Office and PDF files can be extracted inside the MCP service.
 
 See the full setup and security notes in `docs/runbooks/nextcloud-mcp-setup.md`.
 
-### 6c) (Optional) Start the note management agent
-
-```bash
-docker compose --profile agents up -d --build note-agent
-```
-
-Validate it:
-
-```bash
-curl http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/healthz
-curl -sS \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dev-User: you@example.com' \
-  -d '{"session_id":"notes-1","message":"Quick capture","actor":"you@example.com","family_id":1,"attachments":[]}' \
-  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/invoke
-
-curl -sS \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dev-User: you@example.com' \
-  -d '{"session_id":"ingest-1","actor":"you@example.com","family_id":1,"max_items":10}' \
-  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/ingest
-
-curl -sS \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dev-User: you@example.com' \
-  -d '{"actor":"you@example.com","family_id":1,"query":"What did I learn in sunday service last week?","top_k":5,"include_content":true}' \
-  http://127.0.0.1:${NOTE_AGENT_PORT:-8003}/v1/agents/note/retrieve
-```
-
-Service-specific details live in `agents/note_agent/README.md`.
-Ready-ingest now processes only inbox files carrying the real Nextcloud `ready` tag.
-Best-match retrieval now indexes note outputs into the decision-system Postgres backend for hybrid lexical and semantic search.
-
-### 6d) (Optional) Start decision system
+### 6c) (Optional) Start decision system
 
 ```bash
 docker compose --profile decision up -d --build
 ```
 
-Best-match note retrieval depends on the decision-system API being available because note indexing and search run against the shared Postgres backend.
-
-### 6e) Observe decision-agent NATS events
+### 6d) Observe decision-system NATS events
 
 ```bash
 scripts/decision_nats_observe.sh status
@@ -194,21 +159,9 @@ scripts/decision_nats_observe.sh metrics
 
 See the full runbook at `apps/decision-system/docs/runbooks/decision-agent-nats-observability.md`.
 
-### 6f) (Optional) Start task management agent
+### 6e) (Optional) Start Vikunja MCP HTTP
 
-```bash
-docker compose --profile agents up -d --build task-agent
-```
-
-`task-agent` defaults to MCP-first tooling with REST fallback:
-- `TASK_AGENT_TOOLS_BACKEND=auto`
-- `TASK_AGENT_MCP_URL=http://vikunja-mcp-http:8000/mcp`
-- `TASK_AGENT_MCP_TIMEOUT_SECONDS=10`
-- `TASK_AGENT_DEFAULT_TIMEZONE=UTC`
-- `TASK_AGENT_ADVANCED_FEATURES_REQUIRE_CONFIRMATION=false`
-- `TASK_AGENT_RELATION_DEFAULT=relates_to`
-
-If you want a dedicated MCP HTTP runtime server, start:
+If you want a dedicated MCP HTTP runtime server for OpenClaw task access, start:
 
 ```bash
 docker compose --profile ops --profile agents up -d --build vikunja-mcp-http
@@ -217,15 +170,8 @@ docker compose --profile ops --profile agents up -d --build vikunja-mcp-http
 Validate it:
 
 ```bash
-curl http://127.0.0.1:${TASK_AGENT_PORT:-8005}/healthz
-curl -sS \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dev-User: you@example.com' \
-  -d '{"session_id":"tasks-1","message":"today I need to pick up the kids at 3pm then go to the market to pick up milk and eggs","actor":"you@example.com","family_id":1,"attachments":[],"metadata":{}}' \
-  http://127.0.0.1:${TASK_AGENT_PORT:-8005}/v1/agents/tasks/invoke
+curl http://vikunja-mcp-http:8000/mcp
 ```
-
-Service-specific details live in `agents/task_agent/README.md`.
 
 ### 7) Create the first Vikunja admin user
 
@@ -259,8 +205,6 @@ Once DNS + cert trust is set up:
 - Nextcloud MCP (local loopback only): `http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp`
 - Vikunja MCP: stdio server entries in `infra/openclaw.mcp.json` (`vikunja-docker` / `vikunja-local`)
 - Vikunja MCP HTTP (internal service endpoint): `http://vikunja-mcp-http:8000/mcp`
-- Note agent (local loopback only): `http://127.0.0.1:${NOTE_AGENT_PORT:-8003}`
-- Task agent (local loopback only): `http://127.0.0.1:${TASK_AGENT_PORT:-8005}`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
 
