@@ -6,10 +6,40 @@ import httpx
 from worker.celery_app import celery_app
 from agents.common.events.publisher import EventPublisher
 from agents.common.events.subjects import Subjects
+from agents.common.family_events import publish_event as publish_family_event
+from app.services.family_events import make_backend_event_payload
 
 
 FINAL_ROADMAP_STATUSES = {"Done", "Removed", "Archived", "Completed"}
 ACTIVE_DECISION_STATUSES = {"Queued", "In-Progress", "Scheduled", "Scored", "Needs-Work"}
+
+
+def _emit_family_event(
+    *,
+    family_id: int,
+    domain: str,
+    event_type: str,
+    actor_id: str,
+    subject_id: str,
+    subject_type: str,
+    payload: dict,
+    source_agent_id: str,
+    tags: list[str] | None = None,
+) -> None:
+    event = make_backend_event_payload(
+        family_id=family_id,
+        domain=domain,
+        event_type=event_type,
+        actor_id=actor_id,
+        actor_type="system",
+        subject_id=subject_id,
+        subject_type=subject_type,
+        payload=payload,
+        source_agent_id=source_agent_id,
+        source_runtime="backend",
+        tags=tags or [],
+    )
+    publish_family_event(event)
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -382,6 +412,33 @@ def run_task_health_checks():
             context = finding.get("context") or {}
             due_at = context.get("due_date")
             prompt = _task_prompt_for_finding(finding)
+            task_id = context.get("task_id")
+            event_type = None
+            if finding.get("type") == "task_overdue" and task_id is not None:
+                event_type = "task.overdue"
+            elif finding.get("type") == "task_due_soon" and task_id is not None:
+                event_type = "task.updated"
+            if event_type is not None:
+                try:
+                    _emit_family_event(
+                        family_id=family_id,
+                        domain="task",
+                        event_type=event_type,
+                        actor_id="system",
+                        subject_id=str(task_id),
+                        subject_type="task",
+                        payload={
+                            "task_id": task_id,
+                            "title": context.get("title") or finding.get("topic"),
+                            "project_id": context.get("project_id"),
+                            "project_name": context.get("project_name"),
+                            "due_date": due_at,
+                            "finding_type": finding.get("type"),
+                        },
+                        source_agent_id="TaskAgent",
+                    )
+                except Exception:
+                    pass
             try:
                 _upsert_question(
                     base,
@@ -406,6 +463,26 @@ def run_task_health_checks():
                 results["questions_upserted"] += 1
             except Exception:
                 pass
+
+        try:
+            _emit_family_event(
+                family_id=family_id,
+                domain="task",
+                event_type="task.updated",
+                actor_id="system",
+                subject_id=f"task-health-{family_id}",
+                subject_type="task",
+                payload={
+                    "overdue_tasks": snapshot.get("overview", {}).get("overdue_tasks"),
+                    "due_soon_tasks": snapshot.get("overview", {}).get("due_soon_tasks"),
+                    "stale_tasks": snapshot.get("overview", {}).get("stale_tasks"),
+                    "finding_count": len(findings),
+                },
+                source_agent_id="TaskAgent",
+                tags=["health-check"],
+            )
+        except Exception:
+            pass
 
         try:
             _record_event(

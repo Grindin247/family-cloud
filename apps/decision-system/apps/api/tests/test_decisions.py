@@ -1,5 +1,6 @@
 from app.models.entities import (
     Decision,
+    DecisionStatusEnum,
     DecisionQueueItem,
     DecisionScore,
 )
@@ -150,3 +151,66 @@ def test_create_score_below_threshold_routes_to_needs_work(client, db_session):
     detail_response = client.get(f"/v1/decisions/{decision_id}")
     assert detail_response.status_code == 200
     assert detail_response.json()["score_summary"]["weighted_total_1_to_5"] == 2.4
+
+
+def test_decision_routes_emit_canonical_family_events(client, monkeypatch):
+    from app.routers import decisions as decisions_router
+
+    ids = _seed_family_context(client)
+    emitted: list[dict] = []
+
+    def _capture(*, decision, actor, event_type, payload, tags=None):
+        emitted.append(
+            {
+                "decision_id": decision.id,
+                "actor": actor,
+                "event_type": event_type,
+                "payload": payload,
+                "tags": tags or [],
+            }
+        )
+
+    monkeypatch.setattr(decisions_router, "_emit_decision_event", _capture)
+
+    create_response = client.post(
+        "/v1/decisions",
+        json={
+            "family_id": ids["family_id"],
+            "created_by_member_id": ids["member_id"],
+            "title": "Replace roof",
+            "description": "Major repair",
+            "urgency": 5,
+        },
+    )
+    assert create_response.status_code == 201
+    decision_id = create_response.json()["id"]
+
+    assert emitted[-1]["event_type"] == "decision.created"
+
+    patch_response = client.patch(
+        f"/v1/decisions/{decision_id}",
+        json={"notes": "updated via canonical event test"},
+    )
+    assert patch_response.status_code == 200
+    assert emitted[-1]["event_type"] == "decision.updated"
+
+    score_response = client.post(
+        f"/v1/decisions/{decision_id}/score",
+        json={
+            "goal_scores": [
+                {"goal_id": ids["goal_a_id"], "score_1_to_5": 5, "rationale": "important"},
+                {"goal_id": ids["goal_b_id"], "score_1_to_5": 4, "rationale": "helps family"},
+            ],
+            "threshold_1_to_5": 4.0,
+            "computed_by": "human",
+        },
+    )
+    assert score_response.status_code == 200
+    assert emitted[-1]["event_type"] == "decision.score_calculated"
+
+    reject_response = client.post(
+        f"/v1/decisions/{decision_id}/status",
+        params={"status": DecisionStatusEnum.rejected.value},
+    )
+    assert reject_response.status_code == 200
+    assert emitted[-1]["event_type"] == "decision.rejected"

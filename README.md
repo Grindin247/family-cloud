@@ -173,6 +173,27 @@ Validate it:
 curl http://vikunja-mcp-http:8000/mcp
 ```
 
+### 6f) (Optional) Enable WireGuard remote access
+
+Review the `WIREGUARD_*` values in `.env`, then initialize the server config and create one peer per device:
+
+```bash
+./scripts/wireguard-config.py init
+./scripts/wireguard-config.py add-peer james-phone
+docker compose --profile infra up -d wireguard
+```
+
+Router requirement:
+- forward `51820/udp` to the Family-Cloud host
+
+Design defaults:
+- split tunnel only: `192.168.1.0/24,10.77.0.0/24`
+- VPN subnet: `10.77.0.0/24`
+- DNS over VPN: `192.168.1.52`
+- no direct public exposure for app ports
+
+See the full runbook in `docs/runbooks/wireguard-remote-access.md`.
+
 ### 7) Create the first Vikunja admin user
 
 Vikunja requires registration enabled to create the first user.
@@ -198,15 +219,19 @@ docker compose --profile ops up -d
 ## Access URLs
 
 Once DNS + cert trust is set up:
+- Home portal: `https://home.${FAMILY_DOMAIN}`
 - Traefik dashboard: `https://traefik.${FAMILY_DOMAIN}`
 - Keycloak: `https://keycloak.${FAMILY_DOMAIN}`
 - Nextcloud AIO setup: `https://nextcloudsetup.${FAMILY_DOMAIN}`
 - Nextcloud (after setup): `https://nextcloud.${FAMILY_DOMAIN}`
 - Nextcloud MCP (local loopback only): `http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp`
+- WireGuard: `udp://<public-host-or-ddns>:${WIREGUARD_SERVER_PORT:-51820}`
 - Vikunja MCP: stdio server entries in `infra/openclaw.mcp.json` (`vikunja-docker` / `vikunja-local`)
 - Vikunja MCP HTTP (internal service endpoint): `http://vikunja-mcp-http:8000/mcp`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
+
+The home portal is the main family-facing entrypoint. It gives you a single launcher for quick notes, whiteboarding, tasks, goals, files, and future family tools.
 
 ---
 
@@ -226,6 +251,7 @@ On a client machine (your laptop/desktop), add entries for the main hostnames.
 Example (Windows): edit `C:\Windows\System32\drivers\etc\hosts` as Admin:
 ```
 192.168.1.27 traefik.family.callender
+192.168.1.27 home.family.callender
 192.168.1.27 keycloak.family.callender
 192.168.1.27 nextcloudsetup.family.callender
 192.168.1.27 nextcloud.family.callender
@@ -235,7 +261,7 @@ Example (Windows): edit `C:\Windows\System32\drivers\etc\hosts` as Admin:
 
 Example (Linux/macOS): edit `/etc/hosts`:
 ```
-192.168.1.27 traefik.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender
+192.168.1.27 traefik.family.callender home.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender
 ```
 
 #### B2) Use CoreDNS manually on one machine
@@ -251,6 +277,8 @@ Example (Linux/macOS): edit `/etc/hosts`:
 - `certs/wildcard.${FAMILY_DOMAIN}.key`
 
 To avoid browser warnings, import/trust the `.crt` on your devices.
+
+If you use WireGuard for remote access, import that same certificate on remote devices too; the VPN fixes routing and DNS, but it does not make a self-signed certificate publicly trusted.
 
 ---
 

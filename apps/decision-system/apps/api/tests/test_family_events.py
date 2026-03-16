@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agents.common.family_events import build_event, make_privacy
 from app.models.entities import Family, FamilyMember, RoleEnum
 from app.models.family_events import FamilyEventDeadLetter, FamilyEventRecord
-from app.services.family_events import dead_letter_family_event, ingest_family_event
+from app.services.family_events import dead_letter_family_event, export_family_events_jsonl, ingest_family_event
 
 
 def _seed_family(db_session):
@@ -136,3 +137,25 @@ def test_family_event_ingest_route(client, db_session):
     assert body["event"]["event_type"] == "decision.created"
     assert body["event"]["family_id"] == family_id
     assert body["legacy_usage_event_id"] is not None
+
+
+def test_family_event_export_jsonl(db_session, tmp_path: Path):
+    family_id = _seed_family(db_session)
+    event = _sample_event(family_id=family_id, subject_id="export-1")
+    ingest_family_event(db_session, event, subject="family.events.decision")
+    db_session.commit()
+
+    output = tmp_path / "family-events.jsonl"
+    job = export_family_events_jsonl(
+        db_session,
+        family_id=family_id,
+        actor="admin@example.com",
+        output_path=str(output),
+    )
+    db_session.commit()
+
+    assert job.status == "completed"
+    contents = output.read_text(encoding="utf-8").strip().splitlines()
+    assert len(contents) == 1
+    assert "admin@example.com" not in contents[0]
+    assert '"family_pseudo_id":"fam_' in contents[0]

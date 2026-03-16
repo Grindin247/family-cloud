@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agents.common.family_events import validate_event_envelope
+from agents.common.family_events import make_privacy, validate_event_envelope
 from app.models.entities import AgentPlaybackEvent, AgentUsageEvent
 from app.models.family_events import FamilyEventDeadLetter, FamilyEventExportJob, FamilyEventRecord
 
@@ -39,6 +39,48 @@ def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     for key in ("body_text", "content", "raw_text", "text", "note_body", "summary_text"):
         sanitized.pop(key, None)
     return sanitized
+
+
+def make_backend_event_payload(
+    *,
+    family_id: int,
+    domain: str,
+    event_type: str,
+    actor_id: str,
+    actor_type: str,
+    subject_id: str,
+    subject_type: str,
+    payload: dict[str, Any],
+    source_agent_id: str,
+    source_runtime: str = "backend",
+    source_session_id: str | None = None,
+    source_request_id: str | None = None,
+    tags: list[str] | None = None,
+    privacy: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+) -> dict[str, Any]:
+    from agents.common.family_events import build_event
+
+    return build_event(
+        family_id=family_id,
+        domain=domain,
+        event_type=event_type,
+        actor={"actor_type": actor_type, "actor_id": actor_id},
+        subject={"subject_type": subject_type, "subject_id": subject_id},
+        payload=payload,
+        source={
+            "agent_id": source_agent_id,
+            "runtime": source_runtime,
+            "request_id": source_request_id,
+            "session_id": source_session_id,
+        },
+        privacy=privacy or make_privacy(),
+        tags=tags or [],
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+        integrity={"producer": source_agent_id},
+    )
 
 
 def _validate_domain_payload(event: dict[str, Any]) -> None:
@@ -161,6 +203,26 @@ def ingest_family_event(db: Session, event: dict[str, Any], *, subject: str) -> 
     bridge_family_event_to_legacy(db, record=record)
     db.flush()
     return record
+
+
+def ingest_or_dead_letter_family_event(
+    db: Session,
+    *,
+    raw_event: dict[str, Any] | str,
+    subject: str,
+) -> tuple[FamilyEventRecord | None, FamilyEventDeadLetter | None]:
+    try:
+        event = raw_event if isinstance(raw_event, dict) else json.loads(raw_event)
+        if not isinstance(event, dict):
+            raise ValueError("canonical family event payload must decode to an object")
+        record = ingest_family_event(db, event, subject=subject)
+        db.commit()
+        return record, None
+    except Exception as exc:
+        db.rollback()
+        dead_letter = dead_letter_family_event(db, subject=subject, raw_event=raw_event, error=exc)
+        db.commit()
+        return None, dead_letter
 
 
 def dead_letter_family_event(db: Session, *, subject: str, raw_event: dict[str, Any] | str, error: Exception | str) -> FamilyEventDeadLetter:

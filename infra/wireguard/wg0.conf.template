@@ -1,0 +1,9 @@
+[Interface]
+Address = {server_address}
+ListenPort = {server_port}
+PrivateKey = {server_private_key}
+SaveConfig = false
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s {vpn_subnet} -o {postrouting_interface} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s {vpn_subnet} -o {postrouting_interface} -j MASQUERADE
+
+{peer_blocks}

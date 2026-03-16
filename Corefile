@@ -2,6 +2,7 @@
     hosts {
     192.168.1.52 traefik.family.callender
     192.168.1.52 auth.family.callender
+    192.168.1.52 home.family.callender
     192.168.1.52 keycloak.family.callender
     192.168.1.52 ldap.family.callender
     192.168.1.52 nextcloud.family.callender

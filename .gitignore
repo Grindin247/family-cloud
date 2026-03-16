@@ -147,6 +147,7 @@ venv.bak/
 # Local secrets/config generated per-deployment
 secrets/
 config/vikunja/config.yml
+config/wireguard/wg_confs/
 
 # Spyder project settings
 .spyderproject

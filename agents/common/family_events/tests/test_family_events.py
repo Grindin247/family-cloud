@@ -42,3 +42,12 @@ def test_invalid_agent_id_rejected():
                 privacy=make_privacy(),
             )
         )
+
+
+def test_privacy_enum_validation():
+    privacy = make_privacy(classification="family", export_policy="anonymizable")
+    assert privacy["classification"] == "family"
+    assert privacy["export_policy"] == "anonymizable"
+
+    with pytest.raises(Exception):
+        make_privacy(classification="internal")

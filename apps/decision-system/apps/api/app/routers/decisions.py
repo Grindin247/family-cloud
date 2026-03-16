@@ -20,11 +20,37 @@ from app.schemas.decisions import (
 from app.services.scoring import GoalScoreInput, compute_weighted_score, threshold_outcome
 from app.services.access import require_family_admin, require_family_member
 from app.services.event_bus import publish_event
+from app.services.family_events import make_backend_event_payload
 from app.services.ops import record_agent_event
 from agents.common.events.subjects import Subjects
+from agents.common.family_events import publish_event as publish_family_event
 from app.services.memory import create_document_with_embeddings
 
 router = APIRouter(prefix="/v1/decisions", tags=["decisions"])
+
+
+def _emit_decision_event(
+    *,
+    decision: Decision,
+    actor: str,
+    event_type: str,
+    payload: dict,
+    tags: list[str] | None = None,
+) -> None:
+    event = make_backend_event_payload(
+        family_id=decision.family_id,
+        domain="decision",
+        event_type=event_type,
+        actor_id=actor,
+        actor_type="user",
+        subject_id=str(decision.id),
+        subject_type="decision",
+        payload=payload,
+        source_agent_id="DecisionAgent",
+        source_runtime="backend",
+        tags=tags or json.loads(decision.tags or "[]"),
+    )
+    publish_family_event(event)
 
 
 def _decision_score_summary(db: Session, decision: Decision) -> DecisionScoreSummaryResponse | None:
@@ -172,6 +198,21 @@ def create_decision(
         )
     except Exception:
         pass
+    try:
+        _emit_decision_event(
+            decision=decision,
+            actor=ctx.email if ctx is not None else "system",
+            event_type="decision.created",
+            payload={
+                "decision_id": decision.id,
+                "title": decision.title,
+                "urgency": decision.urgency,
+                "target_date": decision.target_date.isoformat() if decision.target_date else None,
+                "status": decision.status.value,
+            },
+        )
+    except Exception:
+        pass
     record_agent_event(
         db,
         family_id=decision.family_id,
@@ -240,6 +281,21 @@ def update_decision(
             actor=ctx.email if ctx is not None else "system",
             family_id=decision.family_id,
             source="decision-api.decisions",
+        )
+    except Exception:
+        pass
+    try:
+        _emit_decision_event(
+            decision=decision,
+            actor=ctx.email if ctx is not None else "system",
+            event_type="decision.updated",
+            payload={
+                "decision_id": decision.id,
+                "title": decision.title,
+                "urgency": decision.urgency,
+                "target_date": decision.target_date.isoformat() if decision.target_date else None,
+                "status": decision.status.value,
+            },
         )
     except Exception:
         pass
@@ -383,6 +439,23 @@ def manual_score_decision(
         )
     except Exception:
         pass
+    try:
+        _emit_decision_event(
+            decision=decision,
+            actor=ctx.email if ctx is not None else "system",
+            event_type="decision.score_calculated",
+            payload={
+                "decision_id": decision.id,
+                "title": decision.title,
+                "score_type": "goal_alignment",
+                "score_value": weighted_1_to_5,
+                "threshold_1_to_5": payload.threshold_1_to_5,
+                "routed_to": routed_to,
+                "status": decision.status.value,
+            },
+        )
+    except Exception:
+        pass
     record_agent_event(
         db,
         family_id=decision.family_id,
@@ -455,6 +528,20 @@ def queue_decision(
     decision.status = DecisionStatusEnum.queued
     db.commit()
     db.refresh(queue_item)
+    try:
+        _emit_decision_event(
+            decision=decision,
+            actor=ctx.email if ctx is not None else "system",
+            event_type="decision.updated",
+            payload={
+                "decision_id": decision.id,
+                "title": decision.title,
+                "status": decision.status.value,
+                "queue_item_id": queue_item.id,
+            },
+        )
+    except Exception:
+        pass
     record_agent_event(
         db,
         family_id=decision.family_id,
@@ -487,6 +574,25 @@ def update_status(
         raise HTTPException(status_code=400, detail="invalid status")
     decision.status = allowed[status]
     db.commit()
+    canonical_event_type = "decision.updated"
+    if status == DecisionStatusEnum.discretionary_approved.value:
+        canonical_event_type = "decision.approved"
+    elif status == DecisionStatusEnum.rejected.value:
+        canonical_event_type = "decision.rejected"
+    try:
+        _emit_decision_event(
+            decision=decision,
+            actor=ctx.email if ctx is not None else "system",
+            event_type=canonical_event_type,
+            payload={
+                "decision_id": decision.id,
+                "title": decision.title,
+                "previous_status": previous_status,
+                "status": decision.status.value,
+            },
+        )
+    except Exception:
+        pass
     event_type = "decision_completed" if status == DecisionStatusEnum.done.value else "decision_status_updated"
     record_agent_event(
         db,

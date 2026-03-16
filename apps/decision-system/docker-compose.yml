@@ -52,6 +52,19 @@ services:
       - api
     command: celery -A worker.celery_app worker --loglevel=INFO
 
+  family-events:
+    build:
+      context: ./apps/worker
+      dockerfile: Dockerfile
+    env_file: .env
+    volumes:
+      - ./apps/worker:/app
+      - ./apps/api:/app_api
+    depends_on:
+      - db
+      - api
+    command: python -m worker.family_events_worker
+
   beat:
     build:
       context: ./apps/worker
