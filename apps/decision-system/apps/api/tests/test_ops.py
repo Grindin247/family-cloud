@@ -170,3 +170,97 @@ def test_task_metrics_and_admin_snapshot(client, monkeypatch):
     )
     assert snapshot_response.status_code == 200
     assert snapshot_response.json()["overview"]["total_open_tasks"] == 9
+
+
+def test_ops_task_events_bridge_into_canonical_family_events(client):
+    family_id = _seed_family(client)
+    import app.services.ops as ops_service
+
+    captured: list[dict] = []
+
+    def _capture(event: dict):
+        captured.append(event)
+        return event["event_id"]
+
+    ops_service._post_canonical_event = _capture
+
+    created = client.post(
+        f"/v1/family/{family_id}/ops/events",
+        json={
+            "domain": "task",
+            "source_agent": "TasksAgent",
+            "event_type": "task_created",
+            "summary": "Task created",
+            "topic": "Paint fence",
+            "payload": {"task_id": 1, "title": "Paint fence", "tags": ["home"]},
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["canonical_event_id"]
+
+    completed = client.post(
+        f"/v1/family/{family_id}/ops/events",
+        json={
+            "domain": "task",
+            "source_agent": "TasksAgent",
+            "event_type": "task_completed",
+            "summary": "Task completed",
+            "topic": "Paint fence",
+            "payload": {"task_id": 1, "title": "Paint fence"},
+        },
+    )
+    assert completed.status_code == 201
+    assert completed.json()["canonical_event_id"]
+    assert [item["event_type"] for item in captured] == ["task.created", "task.completed"]
+
+
+def test_ops_file_and_note_events_bridge_into_canonical_family_events(client):
+    family_id = _seed_family(client)
+    import app.services.ops as ops_service
+
+    captured: list[dict] = []
+
+    def _capture(event: dict):
+        captured.append(event)
+        return event["event_id"]
+
+    ops_service._post_canonical_event = _capture
+
+    file_response = client.post(
+        f"/v1/family/{family_id}/ops/events",
+        json={
+            "domain": "file",
+            "source_agent": "FileAgent",
+            "event_type": "file_indexed",
+            "summary": "Indexed file",
+            "topic": "Contractor estimate",
+            "payload": {
+                "file_id": "file-1",
+                "path": "/Notes/Inbox/contractor-estimate.md",
+                "title": "Contractor estimate",
+                "tags": ["home"],
+            },
+        },
+    )
+    assert file_response.status_code == 201
+    assert file_response.json()["canonical_event_id"]
+
+    note_response = client.post(
+        f"/v1/family/{family_id}/ops/events",
+        json={
+            "domain": "note",
+            "source_agent": "FileAgent",
+            "event_type": "note_created",
+            "summary": "Created note",
+            "topic": "Sunday Service",
+            "payload": {
+                "path": "/Notes/Areas/Church/2026-03-16-sunday-service.md",
+                "title": "Sunday Service",
+                "note_type": "church",
+                "tags": ["church"],
+            },
+        },
+    )
+    assert note_response.status_code == 201
+    assert note_response.json()["canonical_event_id"]
+    assert [item["event_type"] for item in captured] == ["file.indexed", "note.created"]

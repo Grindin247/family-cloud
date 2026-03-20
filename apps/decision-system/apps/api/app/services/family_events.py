@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agents.common.family_events import make_privacy, validate_event_envelope
@@ -34,11 +36,139 @@ def _json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
+KNOWN_DOMAINS = ("decision", "task", "file", "note", "education")
+METADATA_TOPIC_KEYS = ("note_type", "category", "project", "bucket", "status", "score_type", "area", "goal")
+
+
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload or {})
     for key in ("body_text", "content", "raw_text", "text", "note_body", "summary_text"):
         sanitized.pop(key, None)
     return sanitized
+
+
+def _normalize_string_list(values: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        item = str(value).strip()
+        if item:
+            normalized.append(item)
+    return normalized
+
+
+def _record_to_event_dict(row: FamilyEventRecord) -> dict[str, Any]:
+    return {
+        "event_id": row.event_id,
+        "family_id": row.family_id,
+        "domain": row.domain,
+        "event_type": row.event_type,
+        "event_version": row.event_version,
+        "occurred_at": row.occurred_at,
+        "recorded_at": row.recorded_at,
+        "actor_id": row.actor_id,
+        "actor_person_id": row.actor_person_id,
+        "actor_type": row.actor_type,
+        "subject_id": row.subject_id,
+        "subject_type": row.subject_type,
+        "subject_person_id": row.subject_person_id,
+        "correlation_id": row.correlation_id,
+        "causation_id": row.causation_id,
+        "privacy_classification": row.privacy_classification,
+        "export_policy": row.export_policy,
+        "tags": _json_loads(row.tags_json, []),
+        "payload": _json_loads(row.payload_json, {}),
+        "source": _json_loads(row.source_json, {}),
+        "integrity": _json_loads(row.integrity_json, {}),
+    }
+
+
+def _query_family_event_rows(
+    db: Session,
+    *,
+    family_id: int,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    subject_id: str | None = None,
+    actor_id: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[FamilyEventRecord]:
+    query = select(FamilyEventRecord).where(FamilyEventRecord.family_id == family_id)
+    domain_list = _normalize_string_list(domains)
+    if domain:
+        query = query.where(FamilyEventRecord.domain == domain)
+    if domain_list:
+        query = query.where(FamilyEventRecord.domain.in_(domain_list))
+    if event_type:
+        query = query.where(FamilyEventRecord.event_type == event_type)
+    if subject_id:
+        query = query.where(FamilyEventRecord.subject_id == subject_id)
+    if actor_id:
+        query = query.where(FamilyEventRecord.actor_id == actor_id)
+    if start:
+        query = query.where(FamilyEventRecord.occurred_at >= start)
+    if end:
+        query = query.where(FamilyEventRecord.occurred_at <= end)
+    rows = db.execute(query.order_by(FamilyEventRecord.occurred_at.desc())).scalars().all()
+    if not tag:
+        return rows
+    needle = tag.strip().lower()
+    return [row for row in rows if needle in {str(item).strip().lower() for item in _json_loads(row.tags_json, [])}]
+
+
+def _filter_event_dicts(
+    events: list[dict[str, Any]],
+    *,
+    metric: str | None = None,
+) -> list[dict[str, Any]]:
+    if not metric or metric == "events.count":
+        return events
+    filtered: list[dict[str, Any]] = []
+    for row in events:
+        payload = row["payload"]
+        event_type = row["event_type"]
+        if metric == "notes.created.count" and event_type == "note.created":
+            filtered.append(row)
+        elif metric == "tasks.created.count" and event_type == "task.created":
+            filtered.append(row)
+        elif metric == "tasks.completed.count" and event_type == "task.completed":
+            filtered.append(row)
+        elif metric == "tasks.overdue.count" and event_type == "task.overdue":
+            filtered.append(row)
+        elif metric == "decisions.created.count" and event_type == "decision.created":
+            filtered.append(row)
+        elif metric == "church.notes.count" and event_type == "note.created" and (payload.get("note_type") == "church" or "church" in row.get("tags", [])):
+            filtered.append(row)
+        elif metric == "decision.goal_alignment.avg" and event_type == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
+            filtered.append(row)
+    return filtered
+
+
+def _metric_value(events: list[dict[str, Any]], metric: str) -> float:
+    if metric == "decision.goal_alignment.avg":
+        values: list[float] = []
+        for row in _filter_event_dicts(events, metric=metric):
+            try:
+                values.append(float(row["payload"]["score_value"]))
+            except Exception:
+                continue
+        return sum(values) / len(values) if values else 0.0
+    return float(len(_filter_event_dicts(events, metric=metric)))
+
+
+def _timeline_item_from_event(row: dict[str, Any]) -> dict[str, Any]:
+    title, summary = _title_and_summary(row["event_type"], row["payload"], row["domain"])
+    return {
+        "occurred_at": row["occurred_at"],
+        "domain": row["domain"],
+        "event_type": row["event_type"],
+        "title": title,
+        "summary": summary,
+        "subject_id": row["subject_id"],
+        "tags": row.get("tags", []),
+    }
 
 
 def make_backend_event_payload(
@@ -48,8 +178,10 @@ def make_backend_event_payload(
     event_type: str,
     actor_id: str,
     actor_type: str,
+    actor_person_id: str | None = None,
     subject_id: str,
     subject_type: str,
+    subject_person_id: str | None = None,
     payload: dict[str, Any],
     source_agent_id: str,
     source_runtime: str = "backend",
@@ -66,8 +198,8 @@ def make_backend_event_payload(
         family_id=family_id,
         domain=domain,
         event_type=event_type,
-        actor={"actor_type": actor_type, "actor_id": actor_id},
-        subject={"subject_type": subject_type, "subject_id": subject_id},
+        actor={"actor_type": actor_type, "actor_id": actor_id, "person_id": actor_person_id},
+        subject={"subject_type": subject_type, "subject_id": subject_id, "person_id": subject_person_id},
         payload=payload,
         source={
             "agent_id": source_agent_id,
@@ -114,6 +246,18 @@ def _title_and_summary(event_type: str, payload: dict[str, Any], domain: str) ->
         "file.deleted": ("File deleted", f"File deleted: {subject_name}"),
         "note.created": ("Note created", f"Note created: {subject_name}"),
         "note.summarized": ("Note summarized", f"Note summarized: {subject_name}"),
+        "education.learner.created": ("Learner created", f"Learner created: {subject_name}"),
+        "education.goal.created": ("Education goal created", f"Education goal created: {subject_name}"),
+        "education.goal.updated": ("Education goal updated", f"Education goal updated: {subject_name}"),
+        "education.activity.recorded": ("Learning activity recorded", f"Learning activity recorded: {subject_name}"),
+        "education.assignment.created": ("Assignment created", f"Assignment created: {subject_name}"),
+        "education.assignment.updated": ("Assignment updated", f"Assignment updated: {subject_name}"),
+        "education.assessment.recorded": ("Assessment recorded", f"Assessment recorded: {subject_name}"),
+        "education.practice_repetition.recorded": ("Practice repetition recorded", f"Practice repetition recorded: {subject_name}"),
+        "education.journal.recorded": ("Journal recorded", f"Journal recorded: {subject_name}"),
+        "education.quiz.created": ("Quiz created", f"Quiz created: {subject_name}"),
+        "education.quiz.response_recorded": ("Quiz response recorded", f"Quiz response recorded: {subject_name}"),
+        "education.attachment.linked": ("Attachment linked", f"Attachment linked: {subject_name}"),
     }
     return mapping.get(event_type, (event_type.replace(".", " ").title(), f"{event_type}"))
 
@@ -182,8 +326,10 @@ def ingest_family_event(db: Session, event: dict[str, Any], *, subject: str) -> 
         event_type=str(event["event_type"]),
         actor_type=str(actor.get("actor_type") or "system"),
         actor_id=str(actor.get("actor_id")) if actor.get("actor_id") is not None else None,
+        actor_person_id=str(actor.get("person_id")) if actor.get("person_id") is not None else None,
         subject_type=str(subject_ref.get("subject_type") or "item"),
         subject_id=str(subject_ref.get("subject_id") or "unknown"),
+        subject_person_id=str(subject_ref.get("person_id")) if subject_ref.get("person_id") is not None else None,
         correlation_id=str(correlation.get("correlation_id")) if correlation.get("correlation_id") is not None else None,
         causation_id=str(correlation.get("causation_id")) if correlation.get("causation_id") is not None else None,
         parent_event_id=str(correlation.get("parent_event_id")) if correlation.get("parent_event_id") is not None else None,
@@ -248,7 +394,9 @@ def list_family_events(
     *,
     family_id: int,
     domain: str | None = None,
+    domains: list[str] | None = None,
     event_type: str | None = None,
+    tag: str | None = None,
     subject_id: str | None = None,
     actor_id: str | None = None,
     start: datetime | None = None,
@@ -256,43 +404,19 @@ def list_family_events(
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    query = select(FamilyEventRecord).where(FamilyEventRecord.family_id == family_id)
-    if domain:
-        query = query.where(FamilyEventRecord.domain == domain)
-    if event_type:
-        query = query.where(FamilyEventRecord.event_type == event_type)
-    if subject_id:
-        query = query.where(FamilyEventRecord.subject_id == subject_id)
-    if actor_id:
-        query = query.where(FamilyEventRecord.actor_id == actor_id)
-    if start:
-        query = query.where(FamilyEventRecord.occurred_at >= start)
-    if end:
-        query = query.where(FamilyEventRecord.occurred_at <= end)
-    rows = db.execute(query.order_by(FamilyEventRecord.occurred_at.desc()).offset(offset).limit(limit)).scalars().all()
-    return [
-        {
-            "event_id": row.event_id,
-            "family_id": row.family_id,
-            "domain": row.domain,
-            "event_type": row.event_type,
-            "event_version": row.event_version,
-            "occurred_at": row.occurred_at,
-            "recorded_at": row.recorded_at,
-            "actor_id": row.actor_id,
-            "actor_type": row.actor_type,
-            "subject_id": row.subject_id,
-            "subject_type": row.subject_type,
-            "correlation_id": row.correlation_id,
-            "causation_id": row.causation_id,
-            "privacy_classification": row.privacy_classification,
-            "export_policy": row.export_policy,
-            "tags": _json_loads(row.tags_json, []),
-            "payload": _json_loads(row.payload_json, {}),
-            "source": _json_loads(row.source_json, {}),
-        }
-        for row in rows
-    ]
+    rows = _query_family_event_rows(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        subject_id=subject_id,
+        actor_id=actor_id,
+        start=start,
+        end=end,
+    )
+    return [_record_to_event_dict(row) for row in rows[offset : offset + limit]]
 
 
 def build_timeline(
@@ -301,49 +425,56 @@ def build_timeline(
     family_id: int,
     domain: str | None = None,
     domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    query = select(FamilyEventRecord).where(FamilyEventRecord.family_id == family_id)
-    if domain:
-        query = query.where(FamilyEventRecord.domain == domain)
-    if domains:
-        query = query.where(FamilyEventRecord.domain.in_(domains))
-    if start:
-        query = query.where(FamilyEventRecord.occurred_at >= start)
-    if end:
-        query = query.where(FamilyEventRecord.occurred_at <= end)
-    rows = db.execute(query.order_by(FamilyEventRecord.occurred_at.desc()).limit(limit)).scalars().all()
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        payload = _json_loads(row.payload_json, {})
-        title, summary = _title_and_summary(row.event_type, payload, row.domain)
-        items.append(
-            {
-                "occurred_at": row.occurred_at,
-                "domain": row.domain,
-                "event_type": row.event_type,
-                "title": title,
-                "summary": summary,
-                "subject_id": row.subject_id,
-                "tags": _json_loads(row.tags_json, []),
-            }
-        )
-    return items
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=start,
+        end=end,
+        limit=limit,
+        offset=0,
+    )
+    return [_timeline_item_from_event(row) for row in rows]
 
 
 def query_counts(
     db: Session,
     *,
     family_id: int,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=5000, offset=0)
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=start,
+        end=end,
+        limit=5000,
+        offset=0,
+    )
     metrics = {
+        "events.count": 0.0,
         "notes.created.count": 0.0,
+        "tasks.created.count": 0.0,
         "tasks.completed.count": 0.0,
+        "tasks.overdue.count": 0.0,
         "decisions.created.count": 0.0,
         "decision.goal_alignment.avg": 0.0,
         "church.notes.count": 0.0,
@@ -351,12 +482,17 @@ def query_counts(
     score_values: list[float] = []
     for row in rows:
         payload = row["payload"]
+        metrics["events.count"] += 1.0
         if row["event_type"] == "note.created":
             metrics["notes.created.count"] += 1.0
             if payload.get("note_type") == "church" or "church" in row.get("tags", []):
                 metrics["church.notes.count"] += 1.0
+        elif row["event_type"] == "task.created":
+            metrics["tasks.created.count"] += 1.0
         elif row["event_type"] == "task.completed":
             metrics["tasks.completed.count"] += 1.0
+        elif row["event_type"] == "task.overdue":
+            metrics["tasks.overdue.count"] += 1.0
         elif row["event_type"] == "decision.created":
             metrics["decisions.created.count"] += 1.0
         elif row["event_type"] == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
@@ -375,12 +511,27 @@ def query_time_series(
     family_id: int,
     metric: str,
     bucket: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
     if bucket not in {"day", "week", "month"}:
         raise ValueError("bucket must be day, week, or month")
-    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=5000, offset=0)
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=start,
+        end=end,
+        limit=5000,
+        offset=0,
+    )
     bucketed: dict[str, float] = {}
     bucket_counts: dict[str, int] = {}
     for row in rows:
@@ -394,15 +545,21 @@ def query_time_series(
             bucket_key = occurred_at.strftime("%Y-%m-01T00:00:00+00:00")
         payload = row["payload"]
         increment = 0.0
-        if metric == "notes.created.count" and row["event_type"] == "note.created":
+        if metric == "events.count":
+            increment = 1.0
+        elif metric == "notes.created.count" and row["event_type"] == "note.created":
+            increment = 1.0
+        elif metric == "tasks.created.count" and row["event_type"] == "task.created":
             increment = 1.0
         elif metric == "tasks.completed.count" and row["event_type"] == "task.completed":
+            increment = 1.0
+        elif metric == "tasks.overdue.count" and row["event_type"] == "task.overdue":
             increment = 1.0
         elif metric == "decisions.created.count" and row["event_type"] == "decision.created":
             increment = 1.0
         elif metric == "church.notes.count" and row["event_type"] == "note.created" and (payload.get("note_type") == "church" or "church" in row.get("tags", [])):
             increment = 1.0
-        elif metric == "decision.goal_alignment.avg" and row["event_type"] == "decision.score_calculated":
+        elif metric == "decision.goal_alignment.avg" and row["event_type"] == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
             try:
                 increment = float(payload["score_value"])
             except Exception:
@@ -418,6 +575,231 @@ def query_time_series(
             final_value = value / float(bucket_counts[key])
         points.append({"bucket_start": datetime.fromisoformat(key), "value": final_value})
     return points
+
+
+def get_domain_activity_summary(
+    db: Session,
+    *,
+    family_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    grouped: dict[str, dict[str, Any]] = {}
+    for domain in KNOWN_DOMAINS:
+        grouped[domain] = {
+            "domain": domain,
+            "total_events": 0,
+            "unique_subjects": set(),
+            "unique_actors": set(),
+            "event_types": Counter(),
+            "tags": Counter(),
+        }
+    for row in rows:
+        summary = grouped.setdefault(
+            row["domain"],
+            {"domain": row["domain"], "total_events": 0, "unique_subjects": set(), "unique_actors": set(), "event_types": Counter(), "tags": Counter()},
+        )
+        summary["total_events"] += 1
+        summary["unique_subjects"].add(row["subject_id"])
+        if row["actor_id"]:
+            summary["unique_actors"].add(row["actor_id"])
+        summary["event_types"][row["event_type"]] += 1
+        for tag in row.get("tags", []):
+            summary["tags"][tag] += 1
+    items: list[dict[str, Any]] = []
+    for summary in grouped.values():
+        items.append(
+            {
+                "domain": summary["domain"],
+                "total_events": summary["total_events"],
+                "unique_subjects": len(summary["unique_subjects"]),
+                "unique_actors": len(summary["unique_actors"]),
+                "event_types": dict(summary["event_types"].most_common(5)),
+                "tags": dict(summary["tags"].most_common(5)),
+            }
+        )
+    return sorted(items, key=lambda item: (-item["total_events"], item["domain"]))
+
+
+def compare_periods(
+    db: Session,
+    *,
+    family_id: int,
+    metric: str,
+    current_start: datetime,
+    current_end: datetime,
+    baseline_start: datetime,
+    baseline_end: datetime,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+) -> dict[str, Any]:
+    current_events = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=current_start,
+        end=current_end,
+        limit=10000,
+        offset=0,
+    )
+    baseline_events = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=baseline_start,
+        end=baseline_end,
+        limit=10000,
+        offset=0,
+    )
+    current_value = _metric_value(current_events, metric)
+    baseline_value = _metric_value(baseline_events, metric)
+    delta = current_value - baseline_value
+    delta_pct = None if math.isclose(baseline_value, 0.0) else (delta / baseline_value) * 100.0
+    return {
+        "metric": metric,
+        "baseline": {"start": baseline_start, "end": baseline_end},
+        "current": {"start": current_start, "end": current_end},
+        "baseline_value": baseline_value,
+        "current_value": current_value,
+        "delta": delta,
+        "delta_pct": delta_pct,
+    }
+
+
+def get_event_sequences(
+    db: Session,
+    *,
+    family_id: int,
+    anchor_event_id: str | None = None,
+    anchor_occurred_at: datetime | None = None,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    before_limit: int = 5,
+    after_limit: int = 5,
+) -> dict[str, Any]:
+    if anchor_event_id is None and anchor_occurred_at is None:
+        raise ValueError("anchor_event_id or anchor_occurred_at is required")
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        limit=10000,
+        offset=0,
+    )
+    rows_sorted = sorted(rows, key=lambda item: item["occurred_at"])
+    anchor_index = -1
+    if anchor_event_id is not None:
+        for idx, row in enumerate(rows_sorted):
+            if row["event_id"] == anchor_event_id:
+                anchor_index = idx
+                break
+    else:
+        for idx, row in enumerate(rows_sorted):
+            if row["occurred_at"] >= anchor_occurred_at:
+                anchor_index = idx
+                break
+    if anchor_index == -1:
+        return {"anchor": None, "before": [], "after": []}
+    anchor_row = rows_sorted[anchor_index]
+    before_rows = rows_sorted[max(0, anchor_index - before_limit) : anchor_index]
+    after_rows = rows_sorted[anchor_index + 1 : anchor_index + 1 + after_limit]
+    return {
+        "anchor": _timeline_item_from_event(anchor_row),
+        "before": [_timeline_item_from_event(row) for row in reversed(before_rows)],
+        "after": [_timeline_item_from_event(row) for row in after_rows],
+    }
+
+
+def get_top_tags_or_topics(
+    db: Session,
+    *,
+    family_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    counter: Counter[tuple[str, str]] = Counter()
+    for row in rows:
+        for tag in row.get("tags", []):
+            counter[("tag", str(tag))] += 1
+        payload = row["payload"]
+        for key in METADATA_TOPIC_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                counter[(f"payload.{key}", value.strip())] += 1
+    return [
+        {"source": source, "label": label, "count": count}
+        for (source, label), count in counter.most_common(limit)
+    ]
+
+
+def get_data_quality_summary(
+    db: Session,
+    *,
+    family_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, Any]:
+    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    domain_counts = Counter(row["domain"] for row in rows)
+    sparse_domains = [
+        {"domain": domain, "count": count, "sparse": count < 3}
+        for domain, count in sorted(domain_counts.items())
+        if count < 3
+    ]
+    duplicate_idempotency_keys = 0
+    correlation_counter: Counter[str] = Counter()
+    idempotency_counter: Counter[str] = Counter()
+    max_delay = 0.0
+    delayed_recording_events = 0
+    for row in rows:
+        integrity = row.get("integrity") or {}
+        key = integrity.get("idempotency_key")
+        if isinstance(key, str) and key.strip():
+            idempotency_counter[key.strip()] += 1
+        correlation_id = row.get("correlation_id")
+        if isinstance(correlation_id, str) and correlation_id.strip():
+            correlation_counter[correlation_id.strip()] += 1
+        delay_hours = max((row["recorded_at"] - row["occurred_at"]).total_seconds() / 3600.0, 0.0)
+        max_delay = max(max_delay, delay_hours)
+        if delay_hours >= 24.0:
+            delayed_recording_events += 1
+    duplicate_idempotency_keys = sum(1 for count in idempotency_counter.values() if count > 1)
+    duplicate_correlation_ids = sum(1 for count in correlation_counter.values() if count > 1)
+    covered_domains = sorted(domain_counts.keys())
+    missing_domains = sorted(domain for domain in KNOWN_DOMAINS if domain not in domain_counts)
+    notes: list[str] = []
+    if missing_domains:
+        notes.append(f"Missing domains in window: {', '.join(missing_domains)}.")
+    if delayed_recording_events:
+        notes.append(f"{delayed_recording_events} events were recorded at least 24 hours after they occurred.")
+    if sparse_domains:
+        notes.append("Some domains have sparse coverage in the selected window.")
+    return {
+        "family_id": family_id,
+        "total_events": len(rows),
+        "window_start": start,
+        "window_end": end,
+        "covered_domains": covered_domains,
+        "missing_domains": missing_domains,
+        "sparse_domains": sparse_domains,
+        "duplicate_idempotency_keys": duplicate_idempotency_keys,
+        "duplicate_correlation_ids": duplicate_correlation_ids,
+        "delayed_recording_events": delayed_recording_events,
+        "max_recording_delay_hours": round(max_delay, 2),
+        "notes": notes,
+    }
 
 
 def export_family_events_jsonl(

@@ -6,6 +6,9 @@ celery_app = Celery(
     backend="redis://redis:6379/1",
 )
 
+# Import task registrations eagerly so beat-delivered jobs resolve in the worker.
+import worker.tasks  # noqa: E402,F401
+
 celery_app.conf.beat_schedule = {
     "keycloak-family-sync": {
         "task": "worker.tasks.sync_keycloak_families",

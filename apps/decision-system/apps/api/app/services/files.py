@@ -10,6 +10,7 @@ from agents.common.memory.text import chunk_text
 from app.models.files import FileDocument, FileEmbedding
 from app.schemas.files import FileIndexRequest, FileSearchMatch, FileSearchRequest
 from app.services.embeddings import embed_texts
+from app.services.identity import parse_person_id
 
 
 def _normalize_text(value: str | None) -> str:
@@ -98,7 +99,9 @@ def upsert_file_document(
     if existing is None:
         existing = FileDocument(
             family_id=payload.family_id,
+            owner_person_id=parse_person_id(payload.owner_person_id) if payload.owner_person_id else None,
             actor=payload.actor.strip().lower(),
+            visibility_scope=payload.visibility_scope,
             source_session_id=(payload.source_session_id or "").strip() or None,
             path=payload.path,
             name=payload.name,
@@ -125,7 +128,9 @@ def upsert_file_document(
         db.flush()
     else:
         existing.family_id = payload.family_id
+        existing.owner_person_id = parse_person_id(payload.owner_person_id) if payload.owner_person_id else None
         existing.actor = payload.actor.strip().lower()
+        existing.visibility_scope = payload.visibility_scope
         existing.source_session_id = (payload.source_session_id or "").strip() or None
         existing.name = payload.name
         existing.item_type = payload.item_type
@@ -219,6 +224,8 @@ def search_files(
     embed_dim: int = 1536,
 ) -> list[FileSearchMatch]:
     query = select(FileDocument).where(FileDocument.family_id == payload.family_id).order_by(FileDocument.updated_at.desc())
+    if payload.owner_person_id is not None:
+        query = query.where(FileDocument.owner_person_id == parse_person_id(payload.owner_person_id))
     if payload.preferred_item_types:
         query = query.where(FileDocument.item_type.in_(payload.preferred_item_types))
     if payload.content_types:
@@ -270,6 +277,8 @@ def search_files(
         results.append(
             FileSearchMatch(
                 path=doc.path,
+                owner_person_id=str(doc.owner_person_id) if doc.owner_person_id is not None else None,
+                visibility_scope=doc.visibility_scope,
                 name=doc.name,
                 item_type=doc.item_type,  # type: ignore[arg-type]
                 role=doc.role,  # type: ignore[arg-type]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import threading
@@ -13,6 +11,7 @@ from pydantic import BaseModel, Field
 
 SERVER_NAME = "decision-system-mcp"
 API_BASE = os.getenv("DECISION_API_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+EVENT_API_BASE = os.getenv("FAMILY_EVENT_API_BASE_URL", "http://localhost:8010/v1").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("DECISION_MCP_HTTP_TIMEOUT_SECONDS", "20"))
 AUDIT_LOG_PATH = os.getenv("DECISION_MCP_AUDIT_LOG_PATH", ".decision_mcp_audit.jsonl")
 
@@ -114,6 +113,41 @@ def _request(
     except requests.JSONDecodeError:
         parsed = {"raw": response.text}
 
+    if not response.ok:
+        raise RuntimeError(f"{method} {path} failed ({response.status_code}): {parsed}")
+    return {"status_code": response.status_code, "body": parsed}
+
+
+def _event_request(
+    method: str,
+    path: str,
+    actor_id: str,
+    actor_name: str | None,
+    body: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Decision-Actor-Id": actor_id,
+    }
+    if actor_id:
+        headers["X-Dev-User"] = actor_id
+    if actor_name:
+        headers["X-Decision-Actor-Name"] = actor_name
+    response = requests.request(
+        method=method,
+        url=f"{EVENT_API_BASE}{path}",
+        params=query,
+        json=body,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 204:
+        return {"status_code": response.status_code, "body": None}
+    try:
+        parsed = response.json()
+    except requests.JSONDecodeError:
+        parsed = {"raw": response.text}
     if not response.ok:
         raise RuntimeError(f"{method} {path} failed ({response.status_code}): {parsed}")
     return {"status_code": response.status_code, "body": parsed}
@@ -316,6 +350,65 @@ def list_family_members(family_id: int, actor_id: str = "read-only") -> dict[str
 
 
 @mcp.tool()
+def list_family_persons(family_id: int, actor_id: str = "read-only") -> dict[str, Any]:
+    """Read canonical persons for a family."""
+    return _request("GET", f"/families/{family_id}/persons", actor_id=actor_id, actor_name=SERVER_NAME)["body"]
+
+
+@mcp.tool()
+def get_resolved_context(
+    family_id: int,
+    actor_id: str,
+    target_person_id: str | None = None,
+    source_channel: str | None = None,
+    source_sender_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve canonical family/person context for the current actor."""
+    query: dict[str, Any] = {}
+    if target_person_id is not None:
+        query["target_person_id"] = target_person_id
+    if source_channel is not None:
+        query["source_channel"] = source_channel
+    if source_sender_id is not None:
+        query["source_sender_id"] = source_sender_id
+    return _request("GET", f"/families/{family_id}/context", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def resolve_person_alias(family_id: int, actor_id: str, alias: str) -> dict[str, Any]:
+    """Resolve an alias or nickname to a canonical person."""
+    return _request(
+        "GET",
+        f"/families/{family_id}/resolve-alias",
+        actor_id=actor_id,
+        actor_name=SERVER_NAME,
+        query={"q": alias},
+    )["body"]
+
+
+@mcp.tool()
+def resolve_sender_identity(family_id: int, actor_id: str, source_channel: str, source_sender_id: str) -> dict[str, Any]:
+    """Resolve a channel sender mapping to a canonical person."""
+    return _request(
+        "POST",
+        "/identity/resolve-sender",
+        actor_id=actor_id,
+        actor_name=SERVER_NAME,
+        body={
+            "family_id": family_id,
+            "source_channel": source_channel,
+            "source_sender_id": source_sender_id,
+        },
+    )["body"]
+
+
+@mcp.tool()
+def list_family_features(family_id: int, actor_id: str = "read-only") -> dict[str, Any]:
+    """Read optional domain feature flags for a family."""
+    return _request("GET", f"/families/{family_id}/features", actor_id=actor_id, actor_name=SERVER_NAME)["body"]
+
+
+@mcp.tool()
 def list_goals(family_id: int, active_only: bool = False, actor_id: str = "read-only") -> dict[str, Any]:
     """Read goals for a family."""
     return _request(
@@ -382,14 +475,29 @@ def search_family_memory(family_id: int, actor_id: str, query_text: str, top_k: 
 
 
 @mcp.tool()
-def write_family_memory(family_id: int, actor_id: str, memory_type: str, text: str, source_refs: list[str] | None = None) -> dict[str, Any]:
+def write_family_memory(
+    family_id: int,
+    actor_id: str,
+    memory_type: str,
+    text: str,
+    source_refs: list[str] | None = None,
+    owner_person_id: str | None = None,
+    visibility_scope: str = "family",
+) -> dict[str, Any]:
     """Write a family memory document."""
     return _request(
         "POST",
         f"/family/{family_id}/memory/documents",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
-        body={"family_id": family_id, "type": memory_type, "text": text, "source_refs": source_refs or []},
+        body={
+            "family_id": family_id,
+            "type": memory_type,
+            "text": text,
+            "source_refs": source_refs or [],
+            "owner_person_id": owner_person_id,
+            "visibility_scope": visibility_scope,
+        },
     )["body"]
 
 
@@ -441,6 +549,7 @@ def search_notes(
     query_text: str,
     top_k: int = 5,
     include_content: bool = True,
+    owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Search indexed notes."""
     return _request(
@@ -454,6 +563,7 @@ def search_notes(
             "query": query_text,
             "top_k": top_k,
             "include_content": include_content,
+            "owner_person_id": owner_person_id,
         },
     )["body"]
 
@@ -482,6 +592,7 @@ def index_file_document(
     nextcloud_url: str | None = None,
     related_paths: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Index or update a file document for retrieval."""
     return _request(
@@ -512,6 +623,7 @@ def index_file_document(
             "nextcloud_url": nextcloud_url,
             "related_paths": related_paths or [],
             "metadata": metadata or {},
+            "owner_person_id": owner_person_id,
         },
     )["body"]
 
@@ -525,6 +637,7 @@ def search_files(
     include_content: bool = True,
     preferred_item_types: list[str] | None = None,
     content_types: list[str] | None = None,
+    owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Search indexed files across notes, documents, and media."""
     return _request(
@@ -540,6 +653,7 @@ def search_files(
             "include_content": include_content,
             "preferred_item_types": preferred_item_types or [],
             "content_types": content_types or [],
+            "owner_person_id": owner_person_id,
         },
     )["body"]
 
@@ -547,7 +661,7 @@ def search_files(
 @mcp.tool()
 def record_family_event(event: dict[str, Any], actor_id: str, actor_name: str | None = None) -> dict[str, Any]:
     """Record a canonical family event into the shared Family Cloud backend."""
-    return _request(
+    return _event_request(
         "POST",
         "/events",
         actor_id=actor_id,
@@ -561,20 +675,26 @@ def list_family_events(
     family_id: int,
     actor_id: str,
     domain: str | None = None,
+    domains: list[str] | None = None,
     event_type: str | None = None,
+    tag: str | None = None,
     subject_id: str | None = None,
     actor_filter: str | None = None,
     start: str | None = None,
     end: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """Read canonical family events."""
     query: dict[str, Any] = {"family_id": family_id, "limit": limit, "offset": offset}
     if domain is not None:
         query["domain"] = domain
+    if domains:
+        query["domains"] = domains
     if event_type is not None:
         query["event_type"] = event_type
+    if tag is not None:
+        query["tag"] = tag
     if subject_id is not None:
         query["subject_id"] = subject_id
     if actor_filter is not None:
@@ -583,7 +703,7 @@ def list_family_events(
         query["start"] = start
     if end is not None:
         query["end"] = end
-    return _request("GET", "/events", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+    return _event_request("GET", "/events", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
 
 
 @mcp.tool()
@@ -592,37 +712,55 @@ def get_family_timeline(
     actor_id: str,
     domain: str | None = None,
     domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: str | None = None,
     end: str | None = None,
     limit: int = 100,
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """Read normalized canonical timeline items for a family."""
     query: dict[str, Any] = {"family_id": family_id, "limit": limit}
     if domain is not None:
         query["domain"] = domain
     if domains:
         query["domains"] = domains
+    if event_type is not None:
+        query["event_type"] = event_type
+    if tag is not None:
+        query["tag"] = tag
     if start is not None:
         query["start"] = start
     if end is not None:
         query["end"] = end
-    return _request("GET", "/timeline", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+    return _event_request("GET", "/timeline", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
 
 
 @mcp.tool()
 def get_family_event_counts(
     family_id: int,
     actor_id: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: str | None = None,
     end: str | None = None,
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """Read canonical family event aggregate counts."""
     query: dict[str, Any] = {"family_id": family_id}
+    if domain is not None:
+        query["domain"] = domain
+    if domains:
+        query["domains"] = domains
+    if event_type is not None:
+        query["event_type"] = event_type
+    if tag is not None:
+        query["tag"] = tag
     if start is not None:
         query["start"] = start
     if end is not None:
         query["end"] = end
-    return _request("GET", "/analytics/counts", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+    return _event_request("GET", "/analytics/counts", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
 
 
 @mcp.tool()
@@ -631,16 +769,139 @@ def get_family_event_time_series(
     actor_id: str,
     metric: str,
     bucket: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
     start: str | None = None,
     end: str | None = None,
 ) -> dict[str, Any]:
     """Read canonical family event time-series metrics."""
     query: dict[str, Any] = {"family_id": family_id, "metric": metric, "bucket": bucket}
+    if domain is not None:
+        query["domain"] = domain
+    if domains:
+        query["domains"] = domains
+    if event_type is not None:
+        query["event_type"] = event_type
+    if tag is not None:
+        query["tag"] = tag
     if start is not None:
         query["start"] = start
     if end is not None:
         query["end"] = end
-    return _request("GET", "/analytics/time-series", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+    return _event_request("GET", "/analytics/time-series", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def get_family_event_domain_summary(
+    family_id: int,
+    actor_id: str,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read per-domain family event activity summary."""
+    query: dict[str, Any] = {"family_id": family_id}
+    if start is not None:
+        query["start"] = start
+    if end is not None:
+        query["end"] = end
+    return _event_request("GET", "/analytics/domain-summary", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def compare_family_event_periods(
+    family_id: int,
+    actor_id: str,
+    metric: str,
+    current_start: str,
+    current_end: str,
+    baseline_start: str,
+    baseline_end: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+) -> dict[str, Any]:
+    """Compare a family event metric across two periods."""
+    query: dict[str, Any] = {
+        "family_id": family_id,
+        "metric": metric,
+        "current_start": current_start,
+        "current_end": current_end,
+        "baseline_start": baseline_start,
+        "baseline_end": baseline_end,
+    }
+    if domain is not None:
+        query["domain"] = domain
+    if domains:
+        query["domains"] = domains
+    if event_type is not None:
+        query["event_type"] = event_type
+    if tag is not None:
+        query["tag"] = tag
+    return _event_request("GET", "/analytics/compare-periods", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def get_family_event_sequences(
+    family_id: int,
+    actor_id: str,
+    anchor_event_id: str | None = None,
+    anchor_occurred_at: str | None = None,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    before_limit: int = 5,
+    after_limit: int = 5,
+) -> dict[str, Any]:
+    """Read before/after family event sequences around an anchor event or date."""
+    query: dict[str, Any] = {
+        "family_id": family_id,
+        "before_limit": before_limit,
+        "after_limit": after_limit,
+    }
+    if anchor_event_id is not None:
+        query["anchor_event_id"] = anchor_event_id
+    if anchor_occurred_at is not None:
+        query["anchor_occurred_at"] = anchor_occurred_at
+    if domain is not None:
+        query["domain"] = domain
+    if domains:
+        query["domains"] = domains
+    return _event_request("GET", "/analytics/sequences", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def get_family_event_top_tags(
+    family_id: int,
+    actor_id: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Read top event tags and bounded payload topics."""
+    query: dict[str, Any] = {"family_id": family_id, "limit": limit}
+    if start is not None:
+        query["start"] = start
+    if end is not None:
+        query["end"] = end
+    return _event_request("GET", "/analytics/top-tags", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
+
+
+@mcp.tool()
+def get_family_event_data_quality(
+    family_id: int,
+    actor_id: str,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """Read family event data quality summary."""
+    query: dict[str, Any] = {"family_id": family_id}
+    if start is not None:
+        query["start"] = start
+    if end is not None:
+        query["end"] = end
+    return _event_request("GET", "/analytics/data-quality", actor_id=actor_id, actor_name=SERVER_NAME, query=query)["body"]
 
 
 @mcp.tool()

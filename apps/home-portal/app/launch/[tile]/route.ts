@@ -49,9 +49,36 @@ function xmlValue(xml: string, tag: string): string | null {
   return match?.[1] ?? null;
 }
 
+function encodeWebDavPath(path: string): string {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+async function ensureDirectory(baseUrl: string, username: string, password: string, path: string): Promise<void> {
+  const segments = path.split("/").filter(Boolean);
+  let current = "";
+  for (const segment of segments) {
+    current = `${current}/${segment}`;
+    const response = await fetch(`${baseUrl}/remote.php/dav/files/${encodeURIComponent(username)}/${encodeWebDavPath(current)}`, {
+      method: "MKCOL",
+      headers: {
+        Authorization: authHeader(username, password),
+      },
+      cache: "no-store",
+    });
+    if (!response.ok && response.status !== 405) {
+      throw new Error(`MKCOL failed for ${current} (${response.status})`);
+    }
+  }
+}
+
 async function createTextDocument(baseUrl: string): Promise<string> {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   const { username, password } = await nextcloudAuth();
+  await ensureDirectory(baseUrl, username, password, "/Notes/Inbox");
   const fileName = `Family Cloud Doc ${nowStamp()}.md`;
   const response = await fetch(`${baseUrl}/ocs/v2.php/apps/files/api/v1/directEditing/create`, {
     method: "POST",
@@ -61,7 +88,7 @@ async function createTextDocument(baseUrl: string): Promise<string> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      path: fileName,
+      path: `Notes/Inbox/${fileName}`,
       editorId: "text",
       creatorId: "textdocument",
     }),
@@ -80,9 +107,9 @@ async function createTextDocument(baseUrl: string): Promise<string> {
 async function createWhiteboard(baseUrl: string): Promise<string> {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   const { username, password } = await nextcloudAuth();
-  const fileName = `Family Cloud Whiteboard ${nowStamp()}.whiteboard`;
-  const filePath = encodeURIComponent(fileName);
-  const response = await fetch(`${baseUrl}/remote.php/dav/files/${encodeURIComponent(username)}/${filePath}`, {
+  await ensureDirectory(baseUrl, username, password, "/Notes/Inbox");
+  const filePath = `Notes/Inbox/Family Cloud Whiteboard ${nowStamp()}.whiteboard`;
+  const response = await fetch(`${baseUrl}/remote.php/dav/files/${encodeURIComponent(username)}/${encodeWebDavPath(filePath)}`, {
     method: "PUT",
     headers: {
       Authorization: authHeader(username, password),

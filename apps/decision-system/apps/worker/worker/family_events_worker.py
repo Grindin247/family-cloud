@@ -8,7 +8,7 @@ from pathlib import Path
 
 from nats.aio.client import Client as NATS
 from nats.js.api import ConsumerConfig, StreamConfig
-from nats.js.errors import NotFoundError
+from nats.js.errors import APIError, NotFoundError
 
 API_DIR = Path(os.environ.get("DECISION_API_APP_DIR", "/app_api"))
 if API_DIR.exists():
@@ -25,13 +25,15 @@ SUBJECTS = [
     "family.events.decision",
     "family.events.task",
     "family.events.file",
+    "family.events.education",
 ]
 
 
 async def _ensure_stream(js) -> None:
+    desired_subjects = ["family.>", "decision.>", "roadmap.>", "agent.>", "family.events.>"]
     cfg = StreamConfig(
         name=STREAM_NAME,
-        subjects=["family.>", "decision.>", "roadmap.>", "agent.>", "family.events.>"],
+        subjects=desired_subjects,
         retention="limits",
         storage="file",
         max_age=60 * 60 * 24 * 30 * 1_000_000_000,
@@ -41,8 +43,24 @@ async def _ensure_stream(js) -> None:
     except NotFoundError:
         await js.add_stream(cfg)
         return
-    if set(info.config.subjects or []) != set(cfg.subjects or []):
-        await js.update_stream(cfg)
+
+    existing_subjects = list(info.config.subjects or [])
+    if set(existing_subjects) == set(desired_subjects):
+        return
+
+    merged_subjects = list(dict.fromkeys([*existing_subjects, *desired_subjects]))
+    current_cfg = info.config.as_dict()
+    current_cfg["subjects"] = merged_subjects
+    try:
+        await js.update_stream(StreamConfig(**current_cfg))
+    except APIError as exc:
+        LOGGER.warning(
+            "family_events_stream_update_skipped stream=%s existing_subjects=%s desired_subjects=%s error=%s",
+            STREAM_NAME,
+            ",".join(existing_subjects),
+            ",".join(merged_subjects),
+            exc,
+        )
 
 
 async def _process_message(msg) -> None:

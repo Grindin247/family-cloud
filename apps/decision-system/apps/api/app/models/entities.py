@@ -55,6 +55,7 @@ class Family(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str | None] = mapped_column(String(255), unique=True)
     external_source: Mapped[str | None] = mapped_column(String(32))
     external_id: Mapped[str | None] = mapped_column(String(255))
     external_name: Mapped[str | None] = mapped_column(String(255))

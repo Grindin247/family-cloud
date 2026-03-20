@@ -15,9 +15,9 @@ class AgentSessionResponse(BaseModel):
     family_id: int
     agent_name: str
     actor_email: str
+    actor_person_id: str | None = None
     session_id: str
     status: str
     state: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-

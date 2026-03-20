@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,9 @@ from app.models.entities import (
     Goal,
     RoadmapItem,
 )
+from app.core.config import settings
+from app.services.family_events import make_backend_event_payload
+from agents.common.family_events import make_privacy
 from app.services.task_ops import latest_task_health_snapshot
 
 
@@ -40,6 +44,24 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except Exception:
         return fallback
+
+
+def _post_canonical_event(event: dict[str, Any]) -> str | None:
+    base_url = settings.family_event_api_base_url.rstrip("/")
+    if not base_url:
+        return None
+    headers = {"X-Internal-Admin-Token": settings.family_event_internal_admin_token}
+    response = httpx.post(
+        f"{base_url}/events",
+        json=event,
+        headers=headers,
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    body = response.json()
+    event_body = body.get("event") or {}
+    event_id = event_body.get("event_id")
+    return str(event_id) if event_id else None
 
 
 def _question_response(question: AgentQuestion) -> dict[str, Any]:
@@ -379,6 +401,8 @@ def record_agent_event(
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
     ts = created_at or _utcnow()
+    payload_data = payload or {}
+
     usage = AgentUsageEvent(
         family_id=family_id,
         domain=domain,
@@ -388,7 +412,7 @@ def record_agent_event(
         topic=topic,
         status=status,
         value_number=value_number,
-        payload_json=_json_dumps(payload or {}),
+        payload_json=_json_dumps(payload_data),
         created_at=ts,
     )
     playback = AgentPlaybackEvent(
@@ -399,13 +423,166 @@ def record_agent_event(
         event_type=event_type,
         summary=summary,
         topic=topic,
-        payload_json=_json_dumps(payload or {}),
+        payload_json=_json_dumps(payload_data),
         created_at=ts,
     )
     db.add(usage)
     db.add(playback)
     db.flush()
-    return {"usage_event_id": usage.id, "playback_event_id": playback.id}
+    result = {"usage_event_id": usage.id, "playback_event_id": playback.id}
+
+    canonical = _legacy_agent_event_to_canonical(
+        family_id=family_id,
+        domain=domain,
+        source_agent=source_agent,
+        actor=actor,
+        event_type=event_type,
+        topic=topic,
+        status=status,
+        payload=payload_data,
+        created_at=ts,
+    )
+    if canonical is None:
+        return result
+
+    canonical["legacy_usage_event_id"] = usage.id
+    canonical["legacy_playback_event_id"] = playback.id
+    try:
+        result["canonical_event_id"] = _post_canonical_event(canonical)
+    except Exception as exc:
+        result["canonical_event_id"] = None
+        result["canonical_error"] = str(exc)
+    return result
+
+
+def _legacy_agent_event_to_canonical(
+    *,
+    family_id: int,
+    domain: str,
+    source_agent: str,
+    actor: str,
+    event_type: str,
+    topic: str | None,
+    status: str | None,
+    payload: dict[str, Any],
+    created_at: datetime,
+) -> dict[str, Any] | None:
+    normalized_domain = str(domain).strip().lower()
+    normalized_type = str(event_type).strip().lower()
+    topic_value = (topic or "").strip() or None
+
+    if normalized_domain == "task":
+        source_agent_id = "TaskAgent" if source_agent == "TasksAgent" else source_agent
+        mapped = {
+            "task_created": "task.created",
+            "task_updated": "task.updated",
+            "task_assigned": "task.assigned",
+            "task_completed": "task.completed",
+            "task_overdue": "task.overdue",
+            "task_deleted": "task.deleted",
+        }.get(normalized_type)
+        if mapped is None:
+            return None
+        task_id = payload.get("task_id")
+        if task_id is None:
+            return None
+        canonical_payload = dict(payload)
+        canonical_payload.setdefault("task_id", task_id)
+        if topic_value and "title" not in canonical_payload:
+            canonical_payload["title"] = topic_value
+        if status and "status" not in canonical_payload:
+            canonical_payload["status"] = status
+        if mapped == "task.completed" and "completed_by" not in canonical_payload:
+            canonical_payload["completed_by"] = actor
+        return make_backend_event_payload(
+            family_id=family_id,
+            domain="task",
+            event_type=mapped,
+            actor_id=actor,
+            actor_type="user",
+            subject_id=str(task_id),
+            subject_type="task",
+            payload=canonical_payload,
+            source_agent_id=source_agent_id,
+            source_runtime="backend",
+            tags=_string_tags(payload.get("tags")),
+            privacy=make_privacy(contains_free_text=False),
+        )
+
+    if normalized_domain == "file":
+        mapped = {
+            "file_indexed": "file.indexed",
+            "file_filed": "file.filed",
+            "file_tagged": "file.tagged",
+            "file_deleted": "file.deleted",
+        }.get(normalized_type)
+        if mapped is None:
+            return None
+        subject_id = payload.get("file_id") or payload.get("path")
+        if subject_id is None:
+            return None
+        canonical_payload = dict(payload)
+        if topic_value and "title" not in canonical_payload:
+            canonical_payload["title"] = topic_value
+        if status and "status" not in canonical_payload:
+            canonical_payload["status"] = status
+        return make_backend_event_payload(
+            family_id=family_id,
+            domain="file",
+            event_type=mapped,
+            actor_id=actor,
+            actor_type="user",
+            subject_id=str(subject_id),
+            subject_type="file",
+            payload=canonical_payload,
+            source_agent_id=source_agent,
+            source_runtime="backend",
+            tags=_string_tags(payload.get("tags")),
+            privacy=make_privacy(contains_free_text=False),
+        )
+
+    if normalized_domain == "note":
+        mapped = {
+            "note_created": "note.created",
+            "note_summarized": "note.summarized",
+        }.get(normalized_type)
+        if mapped is None:
+            return None
+        subject_id = payload.get("note_id") or payload.get("path")
+        if subject_id is None:
+            return None
+        canonical_payload = dict(payload)
+        if topic_value and "title" not in canonical_payload:
+            canonical_payload["title"] = topic_value
+        if status and "status" not in canonical_payload:
+            canonical_payload["status"] = status
+        return make_backend_event_payload(
+            family_id=family_id,
+            domain="note",
+            event_type=mapped,
+            actor_id=actor,
+            actor_type="user",
+            subject_id=str(subject_id),
+            subject_type="note",
+            payload=canonical_payload,
+            source_agent_id=source_agent,
+            source_runtime="backend",
+            tags=_string_tags(payload.get("tags")),
+            privacy=make_privacy(contains_free_text=False),
+        )
+
+    return None
+
+
+def _string_tags(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            tags.append(text)
+    return tags
 
 
 def _metric_window_filters(

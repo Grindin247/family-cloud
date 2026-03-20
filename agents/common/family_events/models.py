@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-AllowedDomain = Literal["decision", "task", "file", "note"]
+AllowedDomain = Literal["decision", "task", "file", "note", "education"]
 AllowedRuntime = Literal["openclaw-subagent", "openclaw-acp", "backend"]
 AllowedPrivacyClassification = Literal["private", "family", "research", "commercial"]
 AllowedExportPolicy = Literal["never", "restricted", "anonymizable", "exportable"]
@@ -15,12 +15,14 @@ AllowedExportPolicy = Literal["never", "restricted", "anonymizable", "exportable
 class EventActor(BaseModel):
     actor_type: str = Field(min_length=1, max_length=64)
     actor_id: str = Field(min_length=1, max_length=255)
+    person_id: str | None = Field(default=None, max_length=64)
     display_role: str | None = Field(default=None, max_length=128)
 
 
 class EventSubject(BaseModel):
     subject_type: str = Field(min_length=1, max_length=64)
     subject_id: str = Field(min_length=1, max_length=255)
+    person_id: str | None = Field(default=None, max_length=64)
 
 
 class EventSource(BaseModel):
@@ -81,6 +83,8 @@ class FamilyEvent(BaseModel):
         expected_prefix = f"{self.subject.subject_type}."
         if not self.event_type.startswith(expected_prefix):
             raise ValueError(f"event_type must start with '{expected_prefix}'")
-        if self.source.agent_id not in {"DecisionAgent", "TaskAgent", "FileAgent"}:
-            raise ValueError("source.agent_id must be one of DecisionAgent, TaskAgent, or FileAgent")
+        if self.source.agent_id not in {"DecisionAgent", "TaskAgent", "FileAgent", "EducationService", "EducationAgent", "Vikunja"}:
+            raise ValueError(
+                "source.agent_id must be one of DecisionAgent, TaskAgent, FileAgent, EducationService, EducationAgent, or Vikunja"
+            )
         return self

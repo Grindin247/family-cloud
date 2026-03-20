@@ -9,7 +9,7 @@ from app.core.auth import AuthContext, get_auth_context
 from app.core.db import get_db
 from app.models.agent_sessions import AgentSessionState
 from app.schemas.agent_sessions import AgentSessionResponse, AgentSessionUpsertRequest
-from app.services.access import require_family, require_family_member
+from app.services.access import require_family, require_family_member, require_family_person
 
 router = APIRouter(prefix="/v1/family/{family_id}/agents", tags=["agents"])
 
@@ -36,12 +36,14 @@ def get_agent_session(
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
     actor = _actor_email(ctx, x_dev_user)
+    person = require_family_person(db, family_id, actor)
     row = (
         db.query(AgentSessionState)
         .filter(
             AgentSessionState.family_id == family_id,
             AgentSessionState.agent_name == agent_name,
             AgentSessionState.actor_email == actor,
+            AgentSessionState.actor_person_id == str(person.person_id),
             AgentSessionState.session_id == session_id,
         )
         .one_or_none()
@@ -52,6 +54,7 @@ def get_agent_session(
         family_id=row.family_id,
         agent_name=row.agent_name,
         actor_email=row.actor_email,
+        actor_person_id=str(row.actor_person_id) if row.actor_person_id is not None else None,
         session_id=row.session_id,
         status=row.status,
         state=row.state_jsonb or {},
@@ -74,6 +77,7 @@ def upsert_agent_session(
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
     actor = _actor_email(ctx, x_dev_user)
+    person = require_family_person(db, family_id, actor)
     now = datetime.now(timezone.utc)
     row = (
         db.query(AgentSessionState)
@@ -81,6 +85,7 @@ def upsert_agent_session(
             AgentSessionState.family_id == family_id,
             AgentSessionState.agent_name == agent_name,
             AgentSessionState.actor_email == actor,
+            AgentSessionState.actor_person_id == str(person.person_id),
             AgentSessionState.session_id == session_id,
         )
         .one_or_none()
@@ -90,6 +95,7 @@ def upsert_agent_session(
             family_id=family_id,
             agent_name=agent_name,
             actor_email=actor,
+            actor_person_id=str(person.person_id),
             session_id=session_id,
             status=payload.status or "active",
             state_jsonb=payload.state or {},
@@ -108,6 +114,7 @@ def upsert_agent_session(
         family_id=row.family_id,
         agent_name=row.agent_name,
         actor_email=row.actor_email,
+        actor_person_id=str(row.actor_person_id) if row.actor_person_id is not None else None,
         session_id=row.session_id,
         status=row.status,
         state=row.state_jsonb or {},
@@ -129,12 +136,14 @@ def delete_agent_session(
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
     actor = _actor_email(ctx, x_dev_user)
+    person = require_family_person(db, family_id, actor)
     row = (
         db.query(AgentSessionState)
         .filter(
             AgentSessionState.family_id == family_id,
             AgentSessionState.agent_name == agent_name,
             AgentSessionState.actor_email == actor,
+            AgentSessionState.actor_person_id == str(person.person_id),
             AgentSessionState.session_id == session_id,
         )
         .one_or_none()
@@ -143,4 +152,3 @@ def delete_agent_session(
         return
     db.delete(row)
     db.commit()
-

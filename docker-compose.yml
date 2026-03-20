@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Must run the following commands before running docker compose up.
 #     $ openssl req -x509 -nodes -days 365   -newkey rsa:2048   -keyout certs/wildcard..key   -out certs/wildcard..crt   -subj "/CN=*."   -addext "subjectAltName=DNS:*.,DNS:family"
 #     $ docker volume create nextcloud_aio_mastercontainer
@@ -28,6 +26,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    restart: unless-stopped
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic:/etc/traefik/dynamic:ro
@@ -53,6 +52,7 @@ services:
   auth:
     image: thomseddon/traefik-forward-auth
     container_name: auth
+    restart: unless-stopped
     environment:
       - DEFAULT_PROVIDER=oidc
       # Use the same issuer hostname Keycloak advertises (must match discovery "issuer" exactly).
@@ -88,6 +88,7 @@ services:
   ldap:
     image: lldap/lldap:latest
     container_name: ldap
+    restart: unless-stopped
     environment:
       - LLDAP_JWT_SECRET=${LLDAP_JWT_SECRET}
       - LLDAP_LDAP_BASE_DN=dc=example,dc=com
@@ -131,6 +132,7 @@ services:
     image: quay.io/keycloak/keycloak:24.0
     container_name: keycloak
     command: start-dev
+    restart: unless-stopped
     depends_on:
       ldap:
         condition: service_healthy
@@ -182,7 +184,8 @@ services:
       timeout: 3s
       retries: 10
     networks:
-      - familynet
+      familynet:
+        ipv4_address: 172.20.0.16
     dns:
       - 172.20.0.11
 
@@ -479,6 +482,7 @@ services:
   decision-db:
     image: pgvector/pgvector:pg16
     profiles: ["decision"]
+    restart: unless-stopped
     environment:
       - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
       - POSTGRES_USER=${DECISION_POSTGRES_USER:-decision_user}
@@ -498,6 +502,7 @@ services:
   decision-redis:
     image: redis:7-alpine
     profiles: ["decision"]
+    restart: unless-stopped
     networks:
       decisionnet:
         aliases: [redis]
@@ -505,6 +510,7 @@ services:
   nats:
     image: nats:2.10-alpine
     profiles: ["decision"]
+    restart: unless-stopped
     # Enable NATS server monitoring endpoint ("dashboard") on :8222
     # Useful endpoints:
     #   http://localhost:8222/           (landing)
@@ -525,6 +531,7 @@ services:
 
   decision-api:
     profiles: ["decision"]
+    restart: unless-stopped
     build:
       context: .
       dockerfile: apps/decision-system/apps/api/Dockerfile
@@ -548,11 +555,17 @@ services:
       - REDIS_PORT=6379
       - JWT_SECRET=${DECISION_JWT_SECRET:-change-me}
       - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - FAMILY_EVENT_API_BASE_URL=${FAMILY_EVENT_API_BASE_URL:-http://family-event-api:8000/v1}
+      - FAMILY_EVENT_INTERNAL_ADMIN_TOKEN=${FAMILY_EVENT_INTERNAL_ADMIN_TOKEN:-change-me}
       - TASK_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
       - TASK_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
       - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
       - TASK_HYGIENE_STALE_DAYS=${TASK_AGENT_HYGIENE_STALE_DAYS:-14}
       - TASK_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS=${TASK_AGENT_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS:-12}
+      - TASK_VIKUNJA_FAMILY_ID=${TASK_AGENT_FAMILY_ID:-2}
+      - TASK_VIKUNJA_WEBHOOK_SECRET=${TASK_VIKUNJA_WEBHOOK_SECRET:-change-me-vikunja-webhook}
+      - TASK_VIKUNJA_WEBHOOK_TARGET_URL=${TASK_VIKUNJA_WEBHOOK_TARGET_URL:-http://family-event-api:8000/v1/integrations/vikunja/webhooks/${TASK_AGENT_FAMILY_ID:-2}}
+      - TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES=${TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES:-30}
       - KEYCLOAK_BASE_URL=${DECISION_KEYCLOAK_BASE_URL:-http://keycloak:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-familycloud}
       - KEYCLOAK_SYNC_CLIENT_ID=${DECISION_KEYCLOAK_SYNC_CLIENT_ID:-decision-system-sync}
@@ -574,6 +587,7 @@ services:
 
   decision-worker:
     profiles: ["decision"]
+    restart: unless-stopped
     build:
       context: .
       dockerfile: apps/decision-system/apps/worker/Dockerfile
@@ -582,6 +596,7 @@ services:
       - decision-api
     environment:
       - DECISION_API_BASE_URL=http://api:8000/v1
+      - FAMILY_EVENT_API_BASE_URL=${FAMILY_EVENT_API_BASE_URL:-http://family-event-api:8000/v1}
       - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
       - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
       - POSTGRES_USER=${DECISION_POSTGRES_USER:-decision_user}
@@ -593,34 +608,202 @@ services:
       - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
       - TASK_HYGIENE_STALE_DAYS=${TASK_AGENT_HYGIENE_STALE_DAYS:-14}
       - TASK_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS=${TASK_AGENT_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS:-12}
+      - TASK_VIKUNJA_FAMILY_ID=${TASK_AGENT_FAMILY_ID:-2}
+      - TASK_VIKUNJA_WEBHOOK_SECRET=${TASK_VIKUNJA_WEBHOOK_SECRET:-change-me-vikunja-webhook}
+      - TASK_VIKUNJA_WEBHOOK_TARGET_URL=${TASK_VIKUNJA_WEBHOOK_TARGET_URL:-http://family-event-api:8000/v1/integrations/vikunja/webhooks/${TASK_AGENT_FAMILY_ID:-2}}
+      - TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES=${TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES:-30}
     networks:
-      - decisionnet
+      decisionnet: {}
+      familynet: {}
     volumes:
       - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
     command: celery -A worker.celery_app worker --loglevel=INFO
 
-  decision-family-events:
+  family-event-db:
     profiles: ["decision"]
+    restart: unless-stopped
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${FAMILY_EVENT_POSTGRES_DB:-family_event_service}
+      POSTGRES_USER: ${FAMILY_EVENT_POSTGRES_USER:-family_event_user}
+      POSTGRES_PASSWORD: ${FAMILY_EVENT_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - family_event_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FAMILY_EVENT_POSTGRES_USER:-family_event_user} -d ${FAMILY_EVENT_POSTGRES_DB:-family_event_service}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      decisionnet:
+        aliases: [family-event-db]
+      familynet: {}
+
+  family-event-api:
+    profiles: ["decision"]
+    restart: unless-stopped
     build:
       context: .
-      dockerfile: apps/decision-system/apps/worker/Dockerfile
+      dockerfile: apps/family-event-service/Dockerfile
     depends_on:
-      - decision-db
-      - nats
+      family-event-db:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    ports:
+      - "${FAMILY_EVENT_API_PORT:-8010}:8000"
     environment:
-      - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
-      - POSTGRES_USER=${DECISION_POSTGRES_USER:-decision_user}
-      - POSTGRES_PASSWORD=${DECISION_POSTGRES_PASSWORD:-change-me}
-      - POSTGRES_HOST=db
+      - APP_ENV=prod
+      - POSTGRES_DB=${FAMILY_EVENT_POSTGRES_DB:-family_event_service}
+      - POSTGRES_USER=${FAMILY_EVENT_POSTGRES_USER:-family_event_user}
+      - POSTGRES_PASSWORD=${FAMILY_EVENT_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=family-event-db
       - POSTGRES_PORT=5432
+      - ROOT_PATH=
+      - INTERNAL_ADMIN_TOKEN=${FAMILY_EVENT_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - TASK_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
+      - TASK_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
+      - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
+      - TASK_VIKUNJA_FAMILY_ID=${TASK_AGENT_FAMILY_ID:-2}
+      - TASK_VIKUNJA_WEBHOOK_SECRET=${TASK_VIKUNJA_WEBHOOK_SECRET:-change-me-vikunja-webhook}
+      - TASK_VIKUNJA_WEBHOOK_TARGET_URL=${TASK_VIKUNJA_WEBHOOK_TARGET_URL:-http://family-event-api:8000/v1/integrations/vikunja/webhooks/${TASK_AGENT_FAMILY_ID:-2}}
+      - TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES=${TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES:-30}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    networks:
+      decisionnet: {}
+      familynet: {}
+    volumes:
+      - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+
+  family-event-worker:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/family-event-service/Dockerfile
+    depends_on:
+      family-event-db:
+        condition: service_healthy
+      decision-redis:
+        condition: service_started
+      nats:
+        condition: service_started
+      family-event-api:
+        condition: service_started
+    environment:
+      - POSTGRES_DB=${FAMILY_EVENT_POSTGRES_DB:-family_event_service}
+      - POSTGRES_USER=${FAMILY_EVENT_POSTGRES_USER:-family_event_user}
+      - POSTGRES_PASSWORD=${FAMILY_EVENT_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=family-event-db
+      - POSTGRES_PORT=5432
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - INTERNAL_ADMIN_TOKEN=${FAMILY_EVENT_INTERNAL_ADMIN_TOKEN:-change-me}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - NATS_URL=nats://nats:4222
       - NATS_EVENT_STREAM=FAMILY_EVENTS
+      - TASK_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
+      - TASK_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
+      - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
+      - TASK_VIKUNJA_FAMILY_ID=${TASK_AGENT_FAMILY_ID:-2}
+      - TASK_VIKUNJA_WEBHOOK_SECRET=${TASK_VIKUNJA_WEBHOOK_SECRET:-change-me-vikunja-webhook}
+      - TASK_VIKUNJA_WEBHOOK_TARGET_URL=${TASK_VIKUNJA_WEBHOOK_TARGET_URL:-http://family-event-api:8000/v1/integrations/vikunja/webhooks/${TASK_AGENT_FAMILY_ID:-2}}
+      - TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES=${TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES:-30}
+    command: sh -c "celery -A worker.celery_app worker --beat --loglevel=INFO & python -m worker.family_events_worker"
     networks:
-      - decisionnet
-    command: python -m worker.family_events_worker
+      decisionnet: {}
+      familynet: {}
+    volumes:
+      - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+
+  education-db:
+    profiles: ["decision"]
+    restart: unless-stopped
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${EDUCATION_POSTGRES_DB:-education_management}
+      POSTGRES_USER: ${EDUCATION_POSTGRES_USER:-education_user}
+      POSTGRES_PASSWORD: ${EDUCATION_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - education_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EDUCATION_POSTGRES_USER:-education_user} -d ${EDUCATION_POSTGRES_DB:-education_management}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      decisionnet:
+        aliases: [education-db]
+      familynet: {}
+
+  education-api:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/education-management-service/Dockerfile
+    depends_on:
+      education-db:
+        condition: service_healthy
+      decision-api:
+        condition: service_started
+      nats:
+        condition: service_started
+    ports:
+      - "${EDUCATION_API_PORT:-8020}:8000"
+    environment:
+      - APP_ENV=prod
+      - POSTGRES_DB=${EDUCATION_POSTGRES_DB:-education_management}
+      - POSTGRES_USER=${EDUCATION_POSTGRES_USER:-education_user}
+      - POSTGRES_PASSWORD=${EDUCATION_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=education-db
+      - POSTGRES_PORT=5432
+      - ROOT_PATH=
+      - INTERNAL_ADMIN_TOKEN=${EDUCATION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - NATS_URL=nats://nats:4222
+      - NATS_EVENT_STREAM=FAMILY_EVENTS
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    networks:
+      decisionnet: {}
+      familynet: {}
+
+  education-worker:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/education-management-service/Dockerfile
+    depends_on:
+      education-db:
+        condition: service_healthy
+      decision-redis:
+        condition: service_started
+      nats:
+        condition: service_started
+      education-api:
+        condition: service_started
+    environment:
+      - POSTGRES_DB=${EDUCATION_POSTGRES_DB:-education_management}
+      - POSTGRES_USER=${EDUCATION_POSTGRES_USER:-education_user}
+      - POSTGRES_PASSWORD=${EDUCATION_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=education-db
+      - POSTGRES_PORT=5432
+      - INTERNAL_ADMIN_TOKEN=${EDUCATION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NATS_URL=nats://nats:4222
+      - NATS_EVENT_STREAM=FAMILY_EVENTS
+    command: sh -c "celery -A worker.celery_app worker --beat --loglevel=INFO"
+    networks:
+      decisionnet: {}
+      familynet: {}
 
   decision-beat:
     profiles: ["decision"]
+    restart: unless-stopped
     build:
       context: .
       dockerfile: apps/decision-system/apps/worker/Dockerfile
@@ -629,6 +812,7 @@ services:
       - decision-api
     environment:
       - DECISION_API_BASE_URL=http://api:8000/v1
+      - FAMILY_EVENT_API_BASE_URL=${FAMILY_EVENT_API_BASE_URL:-http://family-event-api:8000/v1}
       - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
       - POSTGRES_DB=${DECISION_POSTGRES_DB:-decision_system}
       - POSTGRES_USER=${DECISION_POSTGRES_USER:-decision_user}
@@ -640,6 +824,10 @@ services:
       - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
       - TASK_HYGIENE_STALE_DAYS=${TASK_AGENT_HYGIENE_STALE_DAYS:-14}
       - TASK_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS=${TASK_AGENT_HYGIENE_MEMBER_OVERLOAD_OPEN_TASKS:-12}
+      - TASK_VIKUNJA_FAMILY_ID=${TASK_AGENT_FAMILY_ID:-2}
+      - TASK_VIKUNJA_WEBHOOK_SECRET=${TASK_VIKUNJA_WEBHOOK_SECRET:-change-me-vikunja-webhook}
+      - TASK_VIKUNJA_WEBHOOK_TARGET_URL=${TASK_VIKUNJA_WEBHOOK_TARGET_URL:-http://family-event-api:8000/v1/integrations/vikunja/webhooks/${TASK_AGENT_FAMILY_ID:-2}}
+      - TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES=${TASK_VIKUNJA_RECONCILE_LOOKBACK_MINUTES:-30}
     networks:
       - decisionnet
     volumes:
@@ -648,6 +836,7 @@ services:
 
   decision-web:
     profiles: ["decision"]
+    restart: unless-stopped
     build:
       context: ./apps/decision-system/apps/web
     environment:
@@ -662,6 +851,7 @@ services:
   decision-nginx:
     image: nginx:1.27-alpine
     profiles: ["decision"]
+    restart: unless-stopped
     depends_on:
       - decision-api
       - decision-web
@@ -681,6 +871,8 @@ volumes:
   nextcloud_mcp_data:
   decision_postgres_data:
   nats_data:
+  family_event_postgres_data:
+  education_postgres_data:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.
   nextcloud_aio_mastercontainer:
     external: true

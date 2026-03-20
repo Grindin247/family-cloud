@@ -11,6 +11,7 @@ celery==5.4.0
 redis==5.2.1
 httpx==0.28.1
 nats-py==2.10.0
+openai==1.109.1
 jsonpatch==1.33
 pgvector==0.3.6
 pytest==8.3.4

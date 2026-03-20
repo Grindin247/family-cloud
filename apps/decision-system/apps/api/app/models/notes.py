@@ -16,7 +16,9 @@ class NoteDocument(Base):
 
     doc_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     family_id: Mapped[int] = mapped_column(Integer, ForeignKey("families.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_person_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("persons.person_id", ondelete="SET NULL"), index=True)
     actor: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    visibility_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="family")
     source_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     item_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)

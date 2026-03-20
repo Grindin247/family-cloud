@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class MemoryDocumentCreate(BaseModel):
     family_id: int
+    owner_person_id: str | None = None
+    visibility_scope: Literal["personal", "family", "admin_only"] = "family"
     type: Literal["decision", "rationale", "chat", "note", "dna", "roadmap"]
     text: str = Field(min_length=1)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
@@ -16,6 +18,8 @@ class MemoryDocumentCreate(BaseModel):
 class MemoryDocumentResponse(BaseModel):
     doc_id: str
     family_id: int
+    owner_person_id: str | None = None
+    visibility_scope: str
     type: str
     text: str
     source_refs: list[dict[str, Any]]
@@ -37,4 +41,3 @@ class MemorySearchHit(BaseModel):
 
 class MemorySearchResponse(BaseModel):
     items: list[MemorySearchHit]
-

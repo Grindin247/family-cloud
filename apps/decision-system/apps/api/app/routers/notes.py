@@ -7,7 +7,7 @@ from agents.common.family_events import emit_canonical_event, make_privacy
 from app.core.auth import AuthContext, get_auth_context
 from app.core.db import get_db
 from app.schemas.notes import NoteIndexRequest, NoteIndexResponse, NoteSearchRequest, NoteSearchResponse
-from app.services.access import require_family, require_family_member
+from app.services.access import require_family, require_family_feature, require_family_member, require_family_person
 from app.services.notes import search_notes, upsert_note_document
 
 router = APIRouter(prefix="/v1/notes", tags=["notes"])
@@ -21,8 +21,12 @@ def index_note(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     require_family(db, payload.family_id)
+    require_family_feature(db, payload.family_id, "files")
     caller = (ctx.email if ctx is not None else (x_dev_user or payload.actor)).strip().lower()
     require_family_member(db, payload.family_id, caller)
+    person = require_family_person(db, payload.family_id, caller)
+    if payload.owner_person_id is None:
+        payload.owner_person_id = str(person.person_id)
     doc = upsert_note_document(db, payload=payload)
     db.commit()
     db.refresh(doc)
@@ -39,6 +43,7 @@ def index_note(
             source_runtime="backend",
             payload={
                 "path": payload.path,
+                "owner_person_id": payload.owner_person_id,
                 "title": payload.title,
                 "note_type": payload.metadata.get("note_type") if isinstance(payload.metadata, dict) else None,
                 "content_type": payload.content_type,
@@ -66,6 +71,10 @@ def note_search(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     require_family(db, payload.family_id)
+    require_family_feature(db, payload.family_id, "files")
     caller = (ctx.email if ctx is not None else (x_dev_user or payload.actor)).strip().lower()
     require_family_member(db, payload.family_id, caller)
+    person = require_family_person(db, payload.family_id, caller)
+    if payload.owner_person_id is None:
+        payload.owner_person_id = str(person.person_id)
     return NoteSearchResponse(items=search_notes(db, payload=payload))

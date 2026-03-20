@@ -140,6 +140,12 @@ curl http://127.0.0.1:${NEXTCLOUD_MCP_PORT:-8002}/mcp
 The MCP container is built locally from the upstream image and adds one extra tool, `nc_webdav_list_ready_files`, for Nextcloud collaborative/system-tag discovery. It still talks to Nextcloud over the internal Docker network at `http://nextcloud-aio-apache:11000`, so it does not depend on the external self-signed TLS path for service-to-service traffic.
 Document parsing is enabled through a local `unstructured` container so Office and PDF files can be extracted inside the MCP service.
 
+Shared Notes PARA layout:
+- `Notes/Inbox` is the landing zone for home-portal docs, whiteboards, and ready-tag staging.
+- `Notes/Projects`, `Notes/Areas`, `Notes/Resources`, `Notes/Archive`, and `Notes/Unfiled` are the canonical folders.
+- Run `scripts/nextcloud_para_agent.py migrate-familycloud --summary-json` once to flatten any legacy `Notes/FamilyCloud/...` content.
+- Run `scripts/nextcloud_para_agent.py process-ready --summary-json` to file `ready`-tagged inbox files.
+
 See the full setup and security notes in `docs/runbooks/nextcloud-mcp-setup.md`.
 
 ### 6c) (Optional) Start decision system

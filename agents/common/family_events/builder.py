@@ -56,6 +56,7 @@ def validate_event_envelope(event: dict[str, Any]) -> None:
 
 def build_event(
     *,
+    event_id: str | None = None,
     family_id: int,
     domain: str,
     event_type: str,
@@ -74,7 +75,7 @@ def build_event(
     integrity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event = FamilyEvent(
-        event_id=new_event_id(),
+        event_id=event_id or new_event_id(),
         schema_version=1,
         occurred_at=_as_utc(occurred_at),
         recorded_at=_as_utc(recorded_at),

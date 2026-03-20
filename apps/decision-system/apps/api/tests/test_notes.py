@@ -29,7 +29,7 @@ def test_note_index_and_search_lexical(client, db_session):
             "family_id": family.id,
             "actor": "u@example.com",
             "source_session_id": "notes-1",
-            "path": "/Notes/FamilyCloud/Areas/Church/2026-02-22-sunday-service.md",
+            "path": "/Notes/Areas/Church/2026-02-22-sunday-service.md",
             "item_type": "polished",
             "role": "polished",
             "title": "Sunday Service",
@@ -41,7 +41,7 @@ def test_note_index_and_search_lexical(client, db_session):
             "tags": ["church", "service"],
             "nextcloud_url": "https://nextcloud.example/polished",
             "raw_note_url": "https://nextcloud.example/raw",
-            "related_paths": ["/Notes/FamilyCloud/Archive/Raw/Church/2026/2026-02-22-sunday-service-raw.md"],
+            "related_paths": ["/Notes/Archive/Raw/Church/2026/2026-02-22-sunday-service-raw.md"],
             "metadata": {"destination": "Areas"},
         },
     )
@@ -54,7 +54,7 @@ def test_note_index_and_search_lexical(client, db_session):
             "family_id": family.id,
             "actor": "u@example.com",
             "source_session_id": "notes-1",
-            "path": "/Notes/FamilyCloud/Archive/Raw/Church/2026/2026-02-22-sunday-service-raw.md",
+            "path": "/Notes/Archive/Raw/Church/2026/2026-02-22-sunday-service-raw.md",
             "item_type": "raw",
             "role": "archive",
             "title": "Sunday Service Raw",
@@ -66,7 +66,7 @@ def test_note_index_and_search_lexical(client, db_session):
             "tags": ["church"],
             "nextcloud_url": "https://nextcloud.example/raw-file",
             "raw_note_url": "https://nextcloud.example/raw-file",
-            "related_paths": ["/Notes/FamilyCloud/Areas/Church/2026-02-22-sunday-service.md"],
+            "related_paths": ["/Notes/Areas/Church/2026-02-22-sunday-service.md"],
             "metadata": {},
         },
     )
@@ -112,7 +112,7 @@ def test_note_search_returns_empty_for_other_family(client, db_session):
         json={
             "family_id": family.id,
             "actor": "u@example.com",
-            "path": "/Notes/FamilyCloud/Projects/2026-03-01-kitchen-remodel.md",
+            "path": "/Notes/Projects/2026-03-01-kitchen-remodel.md",
             "item_type": "polished",
             "role": "polished",
             "title": "Kitchen remodel",
@@ -148,22 +148,22 @@ def test_note_index_normalizes_redundant_adjacent_path_segments(client, db_sessi
         json={
             "family_id": family.id,
             "actor": "u@example.com",
-            "path": "/Notes/FamilyCloud/Area/Area/School/weekly-update.md",
+            "path": "/Notes/Area/Area/School/weekly-update.md",
             "item_type": "polished",
             "role": "polished",
             "title": "Weekly Update",
             "summary": "School notes.",
             "body_text": "This week at school...",
             "related_paths": [
-                "/Notes/FamilyCloud/Area/Area/School/raw.md",
-                "/Notes/FamilyCloud/Area/School/raw.md",
+                "/Notes/Area/Area/School/raw.md",
+                "/Notes/Area/School/raw.md",
             ],
             "metadata": {},
         },
     )
     assert response.status_code == 201
     body = response.json()
-    assert body["path"] == "/Notes/FamilyCloud/Area/School/weekly-update.md"
+    assert body["path"] == "/Notes/Area/School/weekly-update.md"
 
     search_response = client.post(
         "/v1/notes/search",
@@ -177,5 +177,5 @@ def test_note_index_normalizes_redundant_adjacent_path_segments(client, db_sessi
     )
     assert search_response.status_code == 200
     item = search_response.json()["items"][0]
-    assert item["path"] == "/Notes/FamilyCloud/Area/School/weekly-update.md"
-    assert item["related_paths"] == ["/Notes/FamilyCloud/Area/School/raw.md"]
+    assert item["path"] == "/Notes/Area/School/weekly-update.md"
+    assert item["related_paths"] == ["/Notes/Area/School/raw.md"]

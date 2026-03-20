@@ -147,8 +147,10 @@ Validate with an MCP-compatible client:
 - Read the file back.
 - Move the file.
 - Confirm invalid paths return structured errors.
-- Tag one file in `Inbox` with the Nextcloud tag `ready`.
+- Tag one file in `Notes/Inbox` with the Nextcloud tag `ready`.
 - Call `nc_webdav_list_ready_files` and confirm only tagged inbox files are returned.
+- Run `scripts/nextcloud_para_agent.py process-ready --summary-json` and confirm the file is moved into `Notes/Projects`, `Notes/Areas`, `Notes/Resources`, `Notes/Archive`, or `Notes/Unfiled`.
+- Run `scripts/nextcloud_para_agent.py migrate-familycloud --summary-json` once if you still have content under `Notes/FamilyCloud/...`.
 
 ## Security Notes
 

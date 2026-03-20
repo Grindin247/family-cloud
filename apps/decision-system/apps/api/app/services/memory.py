@@ -9,12 +9,15 @@ from sqlalchemy.orm import Session
 from agents.common.memory.text import chunk_text
 from app.models.memory import MemoryDocument, MemoryEmbedding
 from app.services.embeddings import embed_texts
+from app.services.identity import parse_person_id
 
 
 def create_document_with_embeddings(
     db: Session,
     *,
     family_id: int,
+    owner_person_id: str | None = None,
+    visibility_scope: str = "family",
     type: str,
     text_value: str,
     source_refs: list[dict[str, Any]] | None = None,
@@ -22,6 +25,8 @@ def create_document_with_embeddings(
 ) -> MemoryDocument:
     doc = MemoryDocument(
         family_id=family_id,
+        owner_person_id=parse_person_id(owner_person_id) if owner_person_id else None,
+        visibility_scope=visibility_scope,
         type=type,
         text=text_value,
         source_refs_jsonb=source_refs or [],

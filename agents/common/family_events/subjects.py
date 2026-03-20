@@ -8,6 +8,7 @@ SUBJECT_BY_DOMAIN: dict[AllowedDomain, str] = {
     "task": "family.events.task",
     "file": "family.events.file",
     "note": "family.events.file",
+    "education": "family.events.education",
 }
 
 

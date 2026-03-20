@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.auth import AuthContext, get_auth_context
@@ -11,7 +11,7 @@ from app.schemas.memory import (
     MemorySearchRequest,
     MemorySearchResponse,
 )
-from app.services.access import require_family, require_family_member
+from app.services.access import require_family, require_family_member, require_family_person
 from app.services.memory import create_document_with_embeddings, semantic_search
 
 router = APIRouter(prefix="/v1/family/{family_id}/memory", tags=["memory"])
@@ -28,9 +28,18 @@ def create_memory_document(
     require_family(db, family_id)
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
+        person = require_family_person(db, family_id, ctx.email)
+    else:
+        if not x_dev_user:
+            raise HTTPException(status_code=401, detail="X-Dev-User is required when auth is disabled for memory writes")
+        person = require_family_person(db, family_id, x_dev_user.strip().lower())
+    if payload.owner_person_id is None:
+        payload.owner_person_id = str(person.person_id)
     doc = create_document_with_embeddings(
         db,
         family_id=family_id,
+        owner_person_id=payload.owner_person_id,
+        visibility_scope=payload.visibility_scope,
         type=payload.type,
         text_value=payload.text,
         source_refs=payload.source_refs,
@@ -40,6 +49,8 @@ def create_memory_document(
     return MemoryDocumentResponse(
         doc_id=str(doc.doc_id),
         family_id=doc.family_id,
+        owner_person_id=str(doc.owner_person_id) if doc.owner_person_id is not None else None,
+        visibility_scope=doc.visibility_scope,
         type=doc.type,
         text=doc.text,
         source_refs=doc.source_refs_jsonb or [],

@@ -29,6 +29,8 @@ def _normalize_note_path(value: str) -> str:
 class NoteIndexRequest(BaseModel):
     family_id: int
     actor: str = Field(min_length=1)
+    owner_person_id: str | None = None
+    visibility_scope: Literal["personal", "family", "admin_only"] = "family"
     source_session_id: str | None = None
     path: str = Field(min_length=1)
     item_type: NoteItemType
@@ -77,6 +79,7 @@ class NoteIndexResponse(BaseModel):
 class NoteSearchRequest(BaseModel):
     family_id: int
     actor: str = Field(min_length=1)
+    owner_person_id: str | None = None
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=10)
     date_from: date | None = None
@@ -88,6 +91,8 @@ class NoteSearchRequest(BaseModel):
 
 class NoteSearchMatch(BaseModel):
     path: str
+    owner_person_id: str | None = None
+    visibility_scope: str = "family"
     item_type: NoteItemType
     role: NoteRole
     title: str | None = None

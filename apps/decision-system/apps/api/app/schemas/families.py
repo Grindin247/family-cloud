@@ -14,6 +14,7 @@ class FamilyUpdate(BaseModel):
 class FamilyResponse(BaseModel):
     id: int
     name: str
+    slug: str | None = None
     created_at: datetime
 
 

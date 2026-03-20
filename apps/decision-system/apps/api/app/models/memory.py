@@ -16,6 +16,8 @@ class MemoryDocument(Base):
 
     doc_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     family_id: Mapped[int] = mapped_column(Integer, ForeignKey("families.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_person_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("persons.person_id", ondelete="SET NULL"), index=True)
+    visibility_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="family")
     type: Mapped[str] = mapped_column(String(64), nullable=False)  # decision|rationale|chat|note|dna|roadmap
     text: Mapped[str] = mapped_column(Text, nullable=False)
     source_refs_jsonb: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
@@ -30,4 +32,3 @@ class MemoryEmbedding(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
     metadata_jsonb: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-

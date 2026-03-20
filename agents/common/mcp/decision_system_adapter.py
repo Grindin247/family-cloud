@@ -178,15 +178,75 @@ def _to_plan(op: PlannedOperation) -> _OperationPlan:
 @dataclass
 class DecisionSystemTools:
     http: HttpToolClient
+    event_http: HttpToolClient | None = None
 
     def _headers(self, actor_email: str | None) -> dict[str, str] | None:
         return {"X-Dev-User": actor_email} if actor_email else None
+
+    def _event_client(self) -> HttpToolClient:
+        return self.event_http or HttpToolClient(base_url=settings.family_event_api_base_url)
 
     def list_families(self, *, actor_email: str | None = None) -> list[dict[str, Any]]:
         return self.http.request("GET", "/families", headers=self._headers(actor_email)).result["items"]
 
     def list_family_members(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
         return self.http.request("GET", f"/families/{family_id}/members", headers=self._headers(actor_email)).result["items"]
+
+    def list_family_persons(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
+        return self.http.request("GET", f"/families/{family_id}/persons", headers=self._headers(actor_email)).result["items"]
+
+    def get_resolved_context(
+        self,
+        family_id: int,
+        *,
+        actor_email: str,
+        target_person_id: str | None = None,
+        source_channel: str | None = None,
+        source_sender_id: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if target_person_id is not None:
+            params["target_person_id"] = target_person_id
+        if source_channel is not None:
+            params["source_channel"] = source_channel
+        if source_sender_id is not None:
+            params["source_sender_id"] = source_sender_id
+        return self.http.request(
+            "GET",
+            f"/families/{family_id}/context",
+            params=params,
+            headers=self._headers(actor_email),
+        ).result
+
+    def resolve_person_alias(self, family_id: int, query: str, *, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request(
+            "GET",
+            f"/families/{family_id}/resolve-alias",
+            params={"q": query},
+            headers=self._headers(actor_email),
+        ).result
+
+    def resolve_sender(
+        self,
+        family_id: int,
+        *,
+        source_channel: str,
+        source_sender_id: str,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self.http.request(
+            "POST",
+            "/identity/resolve-sender",
+            json_body={
+                "family_id": family_id,
+                "source_channel": source_channel,
+                "source_sender_id": source_sender_id,
+            },
+            headers=self._headers(actor_email),
+        ).result
+
+    def list_family_features(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
+        return self.http.request("GET", f"/families/{family_id}/features", headers=self._headers(actor_email)).result["items"]
 
     def get_family_goals(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
         return self.http.request("GET", "/goals", params={"family_id": family_id}, headers=self._headers(actor_email)).result["items"]
@@ -214,11 +274,27 @@ class DecisionSystemTools:
     def get_family_dna(self, family_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
         return self.http.request("GET", f"/family/{family_id}/dna", headers=self._headers(actor_email)).result
 
-    def write_memory(self, family_id: int, type: str, text: str, *, actor_email: str | None = None) -> dict[str, Any]:
+    def write_memory(
+        self,
+        family_id: int,
+        type: str,
+        text: str,
+        *,
+        actor_email: str | None = None,
+        owner_person_id: str | None = None,
+        visibility_scope: str = "family",
+    ) -> dict[str, Any]:
         return self.http.request(
             "POST",
             f"/family/{family_id}/memory/documents",
-            json_body={"family_id": family_id, "type": type, "text": text, "source_refs": []},
+            json_body={
+                "family_id": family_id,
+                "type": type,
+                "text": text,
+                "source_refs": [],
+                "owner_person_id": owner_person_id,
+                "visibility_scope": visibility_scope,
+            },
             headers=self._headers(actor_email),
         ).result
 
@@ -230,7 +306,16 @@ class DecisionSystemTools:
             headers=self._headers(actor_email),
         ).result
 
-    def search_notes(self, family_id: int, query: str, *, top_k: int = 5, include_content: bool = True, actor_email: str | None = None) -> dict[str, Any]:
+    def search_notes(
+        self,
+        family_id: int,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_content: bool = True,
+        actor_email: str | None = None,
+        owner_person_id: str | None = None,
+    ) -> dict[str, Any]:
         return self.http.request(
             "POST",
             "/notes/search",
@@ -240,6 +325,7 @@ class DecisionSystemTools:
                 "query": query,
                 "top_k": top_k,
                 "include_content": include_content,
+                "owner_person_id": owner_person_id,
             },
             headers=self._headers(actor_email),
         ).result
@@ -269,6 +355,7 @@ class DecisionSystemTools:
         nextcloud_url: str | None = None,
         related_paths: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        owner_person_id: str | None = None,
     ) -> dict[str, Any]:
         return self.http.request(
             "POST",
@@ -296,6 +383,7 @@ class DecisionSystemTools:
                 "nextcloud_url": nextcloud_url,
                 "related_paths": related_paths or [],
                 "metadata": metadata or {},
+                "owner_person_id": owner_person_id,
             },
             headers=self._headers(actor_email),
         ).result
@@ -310,6 +398,7 @@ class DecisionSystemTools:
         preferred_item_types: list[str] | None = None,
         content_types: list[str] | None = None,
         actor_email: str | None = None,
+        owner_person_id: str | None = None,
     ) -> dict[str, Any]:
         return self.http.request(
             "POST",
@@ -322,6 +411,7 @@ class DecisionSystemTools:
                 "include_content": include_content,
                 "preferred_item_types": preferred_item_types or [],
                 "content_types": content_types or [],
+                "owner_person_id": owner_person_id,
             },
             headers=self._headers(actor_email),
         ).result
@@ -520,6 +610,148 @@ class DecisionSystemTools:
             json_body=body,
             headers=self._headers(actor_email),
         ).result
+
+    def record_family_event(self, event: dict[str, Any], *, actor_email: str | None = None) -> dict[str, Any]:
+        return self._event_client().request(
+            "POST",
+            "/events",
+            json_body=event,
+            headers=self._headers(actor_email),
+        ).result
+
+    def list_family_events(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        domains: list[str] | None = None,
+        event_type: str | None = None,
+        tag: str | None = None,
+        subject_id: str | None = None,
+        actor_filter: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"family_id": family_id, "limit": limit, "offset": offset}
+        if domain is not None:
+            params["domain"] = domain
+        if domains:
+            params["domains"] = domains
+        if event_type is not None:
+            params["event_type"] = event_type
+        if tag is not None:
+            params["tag"] = tag
+        if subject_id is not None:
+            params["subject_id"] = subject_id
+        if actor_filter is not None:
+            params["actor_id"] = actor_filter
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._event_client().request("GET", "/events", params=params, headers=self._headers(actor_email)).result
+
+    def get_family_timeline(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        domains: list[str] | None = None,
+        event_type: str | None = None,
+        tag: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"family_id": family_id, "limit": limit}
+        if domain is not None:
+            params["domain"] = domain
+        if domains:
+            params["domains"] = domains
+        if event_type is not None:
+            params["event_type"] = event_type
+        if tag is not None:
+            params["tag"] = tag
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._event_client().request("GET", "/timeline", params=params, headers=self._headers(actor_email)).result
+
+    def get_family_event_counts(
+        self,
+        family_id: int,
+        *,
+        domain: str | None = None,
+        domains: list[str] | None = None,
+        event_type: str | None = None,
+        tag: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"family_id": family_id}
+        if domain is not None:
+            params["domain"] = domain
+        if domains:
+            params["domains"] = domains
+        if event_type is not None:
+            params["event_type"] = event_type
+        if tag is not None:
+            params["tag"] = tag
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._event_client().request("GET", "/analytics/counts", params=params, headers=self._headers(actor_email)).result
+
+    def get_family_event_time_series(
+        self,
+        family_id: int,
+        *,
+        metric: str,
+        bucket: str,
+        domain: str | None = None,
+        domains: list[str] | None = None,
+        event_type: str | None = None,
+        tag: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"family_id": family_id, "metric": metric, "bucket": bucket}
+        if domain is not None:
+            params["domain"] = domain
+        if domains:
+            params["domains"] = domains
+        if event_type is not None:
+            params["event_type"] = event_type
+        if tag is not None:
+            params["tag"] = tag
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._event_client().request("GET", "/analytics/time-series", params=params, headers=self._headers(actor_email)).result
+
+    def get_family_event_domain_summary(
+        self,
+        family_id: int,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"family_id": family_id}
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._event_client().request("GET", "/analytics/domain-summary", params=params, headers=self._headers(actor_email)).result
 
     def query_agent_metrics(
         self,

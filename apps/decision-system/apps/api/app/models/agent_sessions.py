@@ -21,6 +21,7 @@ class AgentSessionState(Base):
     family_id: Mapped[int] = mapped_column(ForeignKey("families.id", ondelete="CASCADE"), primary_key=True)
     agent_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     actor_email: Mapped[str] = mapped_column(String(255), primary_key=True)
+    actor_person_id: Mapped[str | None] = mapped_column(postgresql.UUID(as_uuid=True), ForeignKey("persons.person_id", ondelete="SET NULL"))
     session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
 
     status: Mapped[str] = mapped_column(String(32), default="active")
@@ -31,4 +32,3 @@ class AgentSessionState(Base):
 
 
 Index("ix_agent_session_states_family_updated", AgentSessionState.family_id, AgentSessionState.updated_at)
-

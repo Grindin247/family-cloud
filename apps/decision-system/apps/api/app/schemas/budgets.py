@@ -17,6 +17,7 @@ class BudgetPolicyUpdate(BaseModel):
 
 class MemberBudgetSummary(BaseModel):
     member_id: int
+    person_id: str | None = None
     display_name: str
     role: str
     allowance: int
@@ -32,4 +33,3 @@ class BudgetSummaryResponse(BaseModel):
     period_start_date: date
     period_end_date: date
     members: list[MemberBudgetSummary]
-

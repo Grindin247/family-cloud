@@ -8,7 +8,6 @@ from app.routers import (
     decisions,
     files,
     families,
-    family_events,
     family_dna,
     goals,
     health,
@@ -16,17 +15,18 @@ from app.routers import (
     notes,
     ops,
     roadmap,
+    vikunja_integrations,
 )
 
 __all__ = [
     "health",
     "auth",
     "families",
-    "family_events",
     "goals",
     "decisions",
     "files",
     "roadmap",
+    "vikunja_integrations",
     "budgets",
     "family_dna",
     "memory",

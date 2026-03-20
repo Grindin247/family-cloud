@@ -8,7 +8,7 @@ from app.core.auth import AuthContext, get_auth_context
 from app.core.db import get_db
 from app.models.entities import FamilyMember, Goal
 from app.schemas.goals import GoalCreate, GoalListResponse, GoalResponse, GoalUpdate
-from app.services.access import require_family_editor, require_family_member
+from app.services.access import require_family_editor, require_family_feature, require_family_member
 from app.services.ops import record_agent_event
 
 router = APIRouter(prefix="/v1/goals", tags=["goals"])
@@ -37,6 +37,7 @@ def list_goals(
     if ctx is not None:
         query = query.join(FamilyMember, FamilyMember.family_id == Goal.family_id).where(FamilyMember.email == ctx.email)
     if family_id is not None:
+        require_family_feature(db, family_id, "decision")
         if ctx is not None:
             require_family_member(db, family_id, ctx.email)
         query = query.where(Goal.family_id == family_id)
@@ -67,6 +68,7 @@ def create_goal(
     ctx: AuthContext | None = Depends(get_auth_context),
 ):
     if ctx is not None:
+        require_family_feature(db, payload.family_id, "decision")
         require_family_editor(db, payload.family_id, ctx.email)
     goal = Goal(
         family_id=payload.family_id,
@@ -106,6 +108,7 @@ def update_goal(
     if goal is None:
         raise HTTPException(status_code=404, detail="goal not found")
     if ctx is not None:
+        require_family_feature(db, goal.family_id, "decision")
         require_family_editor(db, goal.family_id, ctx.email)
 
     if payload.name is not None:
@@ -147,6 +150,7 @@ def delete_goal(
     if goal is None:
         raise HTTPException(status_code=404, detail="goal not found")
     if ctx is not None:
+        require_family_feature(db, goal.family_id, "decision")
         require_family_editor(db, goal.family_id, ctx.email)
     record_agent_event(
         db,

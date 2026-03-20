@@ -8,6 +8,7 @@
       "cwd": ".",
       "env": {
         "DECISION_API_BASE_URL": "http://localhost:8000/v1",
+        "FAMILY_EVENT_API_BASE_URL": "http://localhost:8010/v1",
         "DECISION_MCP_AUDIT_LOG_PATH": ".decision_mcp_audit.jsonl"
       }
     },
@@ -27,6 +28,7 @@
       "cwd": "apps/decision-system",
       "env": {
         "DECISION_API_BASE_URL": "http://api:8000/v1",
+        "FAMILY_EVENT_API_BASE_URL": "http://family-event-api:8000/v1",
         "DECISION_MCP_AUDIT_LOG_PATH": "/tmp/decision_mcp_audit.jsonl"
       }
     },

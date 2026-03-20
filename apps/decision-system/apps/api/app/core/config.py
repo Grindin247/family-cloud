@@ -24,12 +24,18 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     note_embedding_model: str = "text-embedding-3-small"
     note_embedding_timeout_seconds: float = 20.0
+    family_event_api_base_url: str = "http://family-event-api:8000/v1"
+    family_event_internal_admin_token: str = "change-me"
     task_vikunja_url: str = "http://vikunja:3456"
     task_vikunja_api_prefix: str = "/api/v1"
     task_vikunja_token: str = ""
     task_vikunja_token_file: str = ""
     task_hygiene_stale_days: int = 14
     task_hygiene_member_overload_open_tasks: int = 12
+    task_vikunja_family_id: int = 2
+    task_vikunja_webhook_secret: str = ""
+    task_vikunja_webhook_target_url: str = ""
+    task_vikunja_reconcile_lookback_minutes: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

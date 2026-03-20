@@ -7,9 +7,32 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import AuthContext, get_auth_context
 from app.core.db import get_db
-from app.schemas.family_events import AggregateMetricItem, FamilyEventIngestResponse, FamilyEventResponse, TimeSeriesPoint, TimeSeriesResponse, TimelineItem
-from app.services.access import require_family, require_family_member
-from app.services.family_events import build_timeline, ingest_family_event, list_family_events, query_counts, query_time_series
+from app.schemas.family_events import (
+    AggregateMetricItem,
+    DataQualityResponse,
+    DomainSummaryItem,
+    EventSequenceResponse,
+    FamilyEventIngestResponse,
+    FamilyEventResponse,
+    PeriodComparisonResponse,
+    TimeSeriesPoint,
+    TimeSeriesResponse,
+    TimelineItem,
+    TopTagItem,
+)
+from app.services.access import require_family, require_family_feature, require_family_member
+from app.services.family_events import (
+    build_timeline,
+    compare_periods,
+    get_data_quality_summary,
+    get_domain_activity_summary,
+    get_event_sequences,
+    get_top_tags_or_topics,
+    ingest_family_event,
+    list_family_events,
+    query_counts,
+    query_time_series,
+)
 
 router = APIRouter(prefix="/v1", tags=["family-events"])
 
@@ -22,6 +45,7 @@ def _ensure_access(
     x_dev_user: str | None,
 ) -> None:
     require_family(db, family_id)
+    require_family_feature(db, family_id, "events")
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
     elif x_dev_user:
@@ -81,7 +105,9 @@ def create_event(
 def get_events(
     family_id: int = Query(...),
     domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
     event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
     subject_id: str | None = Query(default=None),
     actor_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
@@ -97,7 +123,9 @@ def get_events(
         db,
         family_id=family_id,
         domain=domain,
+        domains=domains,
         event_type=event_type,
+        tag=tag,
         subject_id=subject_id,
         actor_id=actor_id,
         start=start,
@@ -112,6 +140,8 @@ def get_timeline(
     family_id: int = Query(...),
     domain: str | None = Query(default=None),
     domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
@@ -120,12 +150,26 @@ def get_timeline(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    return build_timeline(db, family_id=family_id, domain=domain, domains=domains, start=start, end=end, limit=limit)
+    return build_timeline(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=start,
+        end=end,
+        limit=limit,
+    )
 
 
 @router.get("/analytics/counts", response_model=list[AggregateMetricItem])
 def get_counts(
     family_id: int = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -133,7 +177,16 @@ def get_counts(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    return query_counts(db, family_id=family_id, start=start, end=end)
+    return query_counts(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        start=start,
+        end=end,
+    )
 
 
 @router.get("/analytics/time-series", response_model=TimeSeriesResponse)
@@ -141,6 +194,10 @@ def get_time_series(
     family_id: int = Query(...),
     metric: str = Query(...),
     bucket: str = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -148,5 +205,117 @@ def get_time_series(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    points = [TimeSeriesPoint.model_validate(item) for item in query_time_series(db, family_id=family_id, metric=metric, bucket=bucket, start=start, end=end)]
+    points = [
+        TimeSeriesPoint.model_validate(item)
+        for item in query_time_series(
+            db,
+            family_id=family_id,
+            metric=metric,
+            bucket=bucket,
+            domain=domain,
+            domains=domains,
+            event_type=event_type,
+            tag=tag,
+            start=start,
+            end=end,
+        )
+    ]
     return TimeSeriesResponse(metric=metric, bucket=bucket, points=points)
+
+
+@router.get("/analytics/domain-summary", response_model=list[DomainSummaryItem])
+def get_domain_summary(
+    family_id: int = Query(...),
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    ctx: AuthContext | None = Depends(get_auth_context),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
+    return get_domain_activity_summary(db, family_id=family_id, start=start, end=end)
+
+
+@router.get("/analytics/compare-periods", response_model=PeriodComparisonResponse)
+def get_period_comparison(
+    family_id: int = Query(...),
+    metric: str = Query(...),
+    current_start: datetime = Query(...),
+    current_end: datetime = Query(...),
+    baseline_start: datetime = Query(...),
+    baseline_end: datetime = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    ctx: AuthContext | None = Depends(get_auth_context),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
+    return compare_periods(
+        db,
+        family_id=family_id,
+        metric=metric,
+        current_start=current_start,
+        current_end=current_end,
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+    )
+
+
+@router.get("/analytics/sequences", response_model=EventSequenceResponse)
+def get_sequences(
+    family_id: int = Query(...),
+    anchor_event_id: str | None = Query(default=None),
+    anchor_occurred_at: datetime | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    before_limit: int = Query(default=5, ge=0, le=50),
+    after_limit: int = Query(default=5, ge=0, le=50),
+    db: Session = Depends(get_db),
+    ctx: AuthContext | None = Depends(get_auth_context),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
+    return get_event_sequences(
+        db,
+        family_id=family_id,
+        anchor_event_id=anchor_event_id,
+        anchor_occurred_at=anchor_occurred_at,
+        domain=domain,
+        domains=domains,
+        before_limit=before_limit,
+        after_limit=after_limit,
+    )
+
+
+@router.get("/analytics/top-tags", response_model=list[TopTagItem])
+def get_top_tags(
+    family_id: int = Query(...),
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    ctx: AuthContext | None = Depends(get_auth_context),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
+    return get_top_tags_or_topics(db, family_id=family_id, start=start, end=end, limit=limit)
+
+
+@router.get("/analytics/data-quality", response_model=DataQualityResponse)
+def get_data_quality(
+    family_id: int = Query(...),
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    ctx: AuthContext | None = Depends(get_auth_context),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
+    return get_data_quality_summary(db, family_id=family_id, start=start, end=end)

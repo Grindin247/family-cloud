@@ -26,6 +26,8 @@ def _normalize_path(value: str) -> str:
 class FileIndexRequest(BaseModel):
     family_id: int
     actor: str = Field(min_length=1)
+    owner_person_id: str | None = None
+    visibility_scope: Literal["personal", "family", "admin_only"] = "family"
     source_session_id: str | None = None
     path: str = Field(min_length=1)
     name: str | None = None
@@ -79,6 +81,7 @@ class FileIndexResponse(BaseModel):
 class FileSearchRequest(BaseModel):
     family_id: int
     actor: str = Field(min_length=1)
+    owner_person_id: str | None = None
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=20)
     date_from: date | None = None
@@ -91,6 +94,8 @@ class FileSearchRequest(BaseModel):
 
 class FileSearchMatch(BaseModel):
     path: str
+    owner_person_id: str | None = None
+    visibility_scope: str = "family"
     name: str | None = None
     item_type: FileItemType
     role: FileRole

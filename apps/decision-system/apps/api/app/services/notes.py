@@ -11,6 +11,7 @@ from agents.common.memory.text import chunk_text
 from app.models.notes import NoteDocument, NoteEmbedding
 from app.schemas.notes import NoteIndexRequest, NoteSearchMatch, NoteSearchRequest
 from app.services.embeddings import embed_texts
+from app.services.identity import parse_person_id
 
 
 def _normalize_text(value: str | None) -> str:
@@ -91,7 +92,9 @@ def upsert_note_document(
     if existing is None:
         existing = NoteDocument(
             family_id=payload.family_id,
+            owner_person_id=parse_person_id(payload.owner_person_id) if payload.owner_person_id else None,
             actor=payload.actor.strip().lower(),
+            visibility_scope=payload.visibility_scope,
             source_session_id=(payload.source_session_id or "").strip() or None,
             path=payload.path,
             item_type=payload.item_type,
@@ -113,7 +116,9 @@ def upsert_note_document(
         db.flush()
     else:
         existing.family_id = payload.family_id
+        existing.owner_person_id = parse_person_id(payload.owner_person_id) if payload.owner_person_id else None
         existing.actor = payload.actor.strip().lower()
+        existing.visibility_scope = payload.visibility_scope
         existing.source_session_id = (payload.source_session_id or "").strip() or None
         existing.item_type = payload.item_type
         existing.role = payload.role
@@ -202,6 +207,8 @@ def search_notes(
         .where(NoteDocument.family_id == payload.family_id)
         .order_by(NoteDocument.updated_at.desc())
     )
+    if payload.owner_person_id is not None:
+        query = query.where(NoteDocument.owner_person_id == parse_person_id(payload.owner_person_id))
     if payload.preferred_item_types:
         query = query.where(NoteDocument.item_type.in_(payload.preferred_item_types))
     if payload.date_from is not None:
@@ -252,6 +259,8 @@ def search_notes(
         results.append(
             NoteSearchMatch(
                 path=doc.path,
+                owner_person_id=str(doc.owner_person_id) if doc.owner_person_id is not None else None,
+                visibility_scope=doc.visibility_scope,
                 item_type=doc.item_type,  # type: ignore[arg-type]
                 role=doc.role,  # type: ignore[arg-type]
                 title=doc.title,

@@ -29,7 +29,7 @@ def test_file_index_and_search(client, db_session):
             "family_id": family.id,
             "actor": "u@example.com",
             "source_session_id": "files-1",
-            "path": "/Notes/FamilyCloud/Inbox/contractor-estimate.md",
+            "path": "/Notes/Inbox/contractor-estimate.md",
             "name": "contractor-estimate.md",
             "item_type": "document",
             "role": "inbox",
@@ -45,7 +45,7 @@ def test_file_index_and_search(client, db_session):
             "file_id": "file-1",
             "tags": ["projects", "home"],
             "nextcloud_url": "https://nextcloud.example/f/1",
-            "related_paths": ["/Notes/FamilyCloud/Projects/Home/kitchen-remodel.md"],
+            "related_paths": ["/Notes/Projects/Home/kitchen-remodel.md"],
             "metadata": {"folder": "Inbox"},
         },
     )
@@ -65,7 +65,7 @@ def test_file_index_and_search(client, db_session):
     )
     assert search_response.status_code == 200
     item = search_response.json()["items"][0]
-    assert item["path"] == "/Notes/FamilyCloud/Inbox/contractor-estimate.md"
+    assert item["path"] == "/Notes/Inbox/contractor-estimate.md"
     assert item["name"] == "contractor-estimate.md"
     assert item["item_type"] == "document"
     assert item["file_id"] == "file-1"

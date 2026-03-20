@@ -17,6 +17,7 @@ from app.schemas.families import (
     FamilyUpdate,
 )
 from app.services.access import require_family, require_family_admin, require_family_member
+from app.services.identity import slugify_family_name
 from app.services.purge import purge_family
 
 router = APIRouter(prefix="/v1/families", tags=["families"])
@@ -40,7 +41,7 @@ def create_family(
     db: Session = Depends(get_db),
     ctx: AuthContext | None = Depends(get_auth_context),
 ):
-    family = Family(name=payload.name)
+    family = Family(name=payload.name, slug=slugify_family_name(payload.name))
     db.add(family)
     db.flush()
     if ctx is not None:
@@ -81,6 +82,7 @@ def update_family(
     if ctx is not None:
         require_family_admin(db, family_id, ctx.email)
     family.name = payload.name
+    family.slug = slugify_family_name(payload.name)
     db.commit()
     db.refresh(family)
     return FamilyResponse.model_validate(family, from_attributes=True)

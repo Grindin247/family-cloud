@@ -15,7 +15,8 @@ from app.services.budget import (
     member_allowance_map,
     member_remaining_in_period,
 )
-from app.services.access import require_family_admin, require_family_editor, require_family_member
+from app.services.access import require_family_admin, require_family_editor, require_family_feature, require_family_member
+from app.services.identity import ensure_person_for_member
 
 router = APIRouter(prefix="/v1/budgets", tags=["budgets"])
 
@@ -28,11 +29,13 @@ def _summary_response(db: Session, family_id: int, period: Period, policy: Budge
     members = _family_members(db, family_id)
     summaries: list[MemberBudgetSummary] = []
     for member in members:
+        person = ensure_person_for_member(db, member)
         ensure_member_allocation_in_period(db, family_id, period, member.id)
         allowance, used, remaining = member_remaining_in_period(db, period.id, member.id)
         summaries.append(
             MemberBudgetSummary(
                 member_id=member.id,
+                person_id=str(person.person_id),
                 display_name=member.display_name,
                 role=member.role.value,
                 allowance=allowance,
@@ -61,6 +64,7 @@ def get_budget_summary(
     family = db.get(Family, family_id)
     if family is None:
         raise HTTPException(status_code=404, detail="family not found")
+    require_family_feature(db, family_id, "decision")
     if ctx is not None:
         require_family_member(db, family_id, ctx.email)
 
@@ -80,6 +84,7 @@ def update_budget_policy(
     family = db.get(Family, family_id)
     if family is None:
         raise HTTPException(status_code=404, detail="family not found")
+    require_family_feature(db, family_id, "decision")
     if ctx is not None:
         require_family_editor(db, family_id, ctx.email)
 
@@ -142,6 +147,7 @@ def reset_budget_period(
     family = db.get(Family, family_id)
     if family is None:
         raise HTTPException(status_code=404, detail="family not found")
+    require_family_feature(db, family_id, "decision")
     if ctx is not None:
         require_family_admin(db, family_id, ctx.email)
 

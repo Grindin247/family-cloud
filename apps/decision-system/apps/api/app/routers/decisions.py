@@ -18,7 +18,7 @@ from app.schemas.decisions import (
     DecisionUpdate,
 )
 from app.services.scoring import GoalScoreInput, compute_weighted_score, threshold_outcome
-from app.services.access import require_family_admin, require_family_member
+from app.services.access import require_family_admin, require_family_feature, require_family_member
 from app.services.event_bus import publish_event
 from app.services.family_events import make_backend_event_payload
 from app.services.ops import record_agent_event
@@ -124,6 +124,7 @@ def list_decisions(
     if ctx is not None:
         query = query.join(FamilyMember, FamilyMember.family_id == Decision.family_id).where(FamilyMember.email == ctx.email)
     if family_id is not None:
+        require_family_feature(db, family_id, "decision")
         if ctx is not None:
             require_family_member(db, family_id, ctx.email)
         query = query.where(Decision.family_id == family_id)
@@ -139,6 +140,7 @@ def get_decision(
 ):
     decision = _ensure_decision_exists(db, decision_id)
     if ctx is not None:
+        require_family_feature(db, decision.family_id, "decision")
         require_family_member(db, decision.family_id, ctx.email)
     return _to_decision_response(db, decision, include_scores=True)
 
@@ -150,6 +152,7 @@ def create_decision(
     ctx: AuthContext | None = Depends(get_auth_context),
 ):
     created_by_member_id = payload.created_by_member_id
+    require_family_feature(db, payload.family_id, "decision")
     if ctx is not None:
         member = require_family_member(db, payload.family_id, ctx.email)
         created_by_member_id = member.id
@@ -238,6 +241,7 @@ def update_decision(
 ):
     decision = _ensure_decision_exists(db, decision_id)
     if ctx is not None:
+        require_family_feature(db, decision.family_id, "decision")
         require_family_member(db, decision.family_id, ctx.email)
 
     if payload.owner_member_id is not None:
