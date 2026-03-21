@@ -1,18 +1,35 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "nextcloud_para_agent.py"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+MODULE_PATH = ROOT / "scripts" / "nextcloud_para_agent.py"
 SPEC = importlib.util.spec_from_file_location("nextcloud_para_agent", MODULE_PATH)
 assert SPEC is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+
+def test_script_standalone_help_bootstraps_repo_root() -> None:
+    result = subprocess.run(
+        [sys.executable, str(MODULE_PATH), "--help"],
+        cwd=str(ROOT / "scripts"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "process-ready" in result.stdout
 
 
 def test_readable_markdown_with_project_context_goes_to_projects() -> None:

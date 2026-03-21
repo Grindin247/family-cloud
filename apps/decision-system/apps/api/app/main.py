@@ -11,8 +11,10 @@ from app.routers import (
     auth,
     budgets,
     decisions,
+    file_inbox,
     files,
     families,
+    family_events,
     family_dna,
     identity,
     goals,
@@ -53,10 +55,12 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(families.router)
+app.include_router(family_events.router)
 app.include_router(identity.router)
 app.include_router(goals.router)
 app.include_router(decisions.router)
 app.include_router(files.router)
+app.include_router(file_inbox.router)
 app.include_router(roadmap.router)
 app.include_router(vikunja_integrations.router)
 app.include_router(budgets.router)

@@ -66,7 +66,16 @@ def semantic_search(
         hits = []
         for doc in rows:
             if query.lower() in (doc.text or "").lower():
-                hits.append({"doc_id": str(doc.doc_id), "chunk_id": 0, "score": 0.1, "text": doc.text[:500], "metadata": {"type": doc.type}})
+                hits.append(
+                    {
+                        "doc_id": str(doc.doc_id),
+                        "chunk_id": 0,
+                        "score": 0.1,
+                        "text": doc.text[:500],
+                        "metadata": {"type": doc.type},
+                        "source_refs": list(doc.source_refs_jsonb or []),
+                    }
+                )
         return hits[:top_k]
 
     qvec = embed_texts([query], dim=embed_dim)[0]
@@ -78,7 +87,8 @@ def semantic_search(
                e.chunk_id as chunk_id,
                1.0 / (1.0 + (e.embedding <-> (:qvec)::vector)) as score,
                COALESCE(e.metadata_jsonb->>'text', '') as chunk_text,
-               COALESCE(e.metadata_jsonb, '{}'::jsonb) as metadata
+               COALESCE(e.metadata_jsonb, '{}'::jsonb) as metadata,
+               COALESCE(d.source_refs_jsonb, '[]'::jsonb) as source_refs
         FROM memory_embeddings e
         JOIN memory_documents d ON d.doc_id = e.doc_id
         WHERE d.family_id = :family_id
@@ -94,6 +104,7 @@ def semantic_search(
             "score": float(row["score"]),
             "text": row["chunk_text"],
             "metadata": dict(row["metadata"] or {}),
+            "source_refs": list(row["source_refs"] or []),
         }
         for row in rows
     ]

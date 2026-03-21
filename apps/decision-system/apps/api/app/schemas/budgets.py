@@ -3,8 +3,8 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 
-class MemberAllowanceUpdate(BaseModel):
-    member_id: int
+class PersonAllowanceUpdate(BaseModel):
+    person_id: str
     allowance: int = Field(ge=0, le=50)
 
 
@@ -12,12 +12,11 @@ class BudgetPolicyUpdate(BaseModel):
     threshold_1_to_5: float = Field(ge=1.0, le=5.0)
     period_days: int = Field(ge=7, le=365)
     default_allowance: int = Field(ge=0, le=50)
-    member_allowances: list[MemberAllowanceUpdate] = Field(default_factory=list)
+    person_allowances: list[PersonAllowanceUpdate] = Field(default_factory=list)
 
 
-class MemberBudgetSummary(BaseModel):
-    member_id: int
-    person_id: str | None = None
+class PersonBudgetSummary(BaseModel):
+    person_id: str
     display_name: str
     role: str
     allowance: int
@@ -32,4 +31,4 @@ class BudgetSummaryResponse(BaseModel):
     default_allowance: int
     period_start_date: date
     period_end_date: date
-    members: list[MemberBudgetSummary]
+    members: list[PersonBudgetSummary]

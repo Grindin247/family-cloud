@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Family, FamilyMember, RoleEnum
+from app.models.identity import Person
 from app.services.identity import (
     ensure_person_for_member,
     require_feature_enabled as require_identity_feature_enabled,
@@ -65,6 +68,14 @@ def require_family_editor(db: Session, family_id: int, email: str) -> FamilyMemb
 def require_family_person(db: Session, family_id: int, email: str):
     require_family(db, family_id)
     return resolve_person_by_actor_identifier(db, family_id, email)
+
+
+def require_person(db: Session, family_id: int, person_id: str | UUID, *, field_name: str = "person_id") -> Person:
+    require_family(db, family_id)
+    person = db.get(Person, UUID(str(person_id)))
+    if person is None or person.family_id != family_id:
+        raise HTTPException(status_code=400, detail=f"{field_name} must belong to the family")
+    return person
 
 
 def require_family_feature(db: Session, family_id: int, feature_key: str) -> None:

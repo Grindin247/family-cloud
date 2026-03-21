@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -116,3 +116,56 @@ class FamilyEventIngestResponse(BaseModel):
     event: FamilyEventResponse
     legacy_usage_event_id: int | None = None
     legacy_playback_event_id: int | None = None
+
+
+class ViewerMembershipResponse(BaseModel):
+    family_id: int
+    family_name: str
+    member_id: int
+    person_id: str | None = None
+    role: str
+
+
+class EventViewerMeResponse(BaseModel):
+    authenticated: bool
+    email: str | None = None
+    memberships: list[ViewerMembershipResponse] = Field(default_factory=list)
+
+
+class ViewerPersonResponse(BaseModel):
+    person_id: str
+    display_name: str
+    role_in_family: str | None = None
+    is_admin: bool = False
+    status: str
+
+
+class EventViewerContextResponse(BaseModel):
+    family_id: int
+    family_slug: str
+    person_id: str
+    actor_person_id: str
+    target_person_id: str
+    is_family_admin: bool
+    primary_email: str | None = None
+    directory_account_id: str | None = None
+    member_id: int | None = None
+    persons: list[ViewerPersonResponse] = Field(default_factory=list)
+
+
+class EventSearchResponse(BaseModel):
+    items: list[FamilyEventResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class EventFilterOptionsResponse(BaseModel):
+    domains: list[str] = Field(default_factory=list)
+    event_types: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    actor_ids: list[str] = Field(default_factory=list)
+    subject_ids: list[str] = Field(default_factory=list)
+
+
+EventMemberScope = Literal["mine", "all", "person"]

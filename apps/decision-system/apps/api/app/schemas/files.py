@@ -118,3 +118,34 @@ class FileSearchMatch(BaseModel):
 
 class FileSearchResponse(BaseModel):
     items: list[FileSearchMatch] = Field(default_factory=list)
+
+
+class ProcessInboxRequest(BaseModel):
+    actor: str | None = None
+    include_dashboard_docs: bool = True
+    respect_idle_window: bool = True
+    source: str = "api"
+
+
+class ProcessInboxResult(BaseModel):
+    source_path: str
+    destination_path: str
+    title: str
+    folder: str
+    item_type: FileItemType | str
+    confidence: float
+    indexed: bool
+    unreadable: bool
+    reason: str
+    nextcloud_url: str | None = None
+
+
+class ProcessInboxResponse(BaseModel):
+    status: Literal["completed", "partial", "failed"] = "completed"
+    processed: int = 0
+    indexed: int = 0
+    unfiled: int = 0
+    skipped_locked: int = 0
+    skipped_recent: int = 0
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    results: list[ProcessInboxResult] = Field(default_factory=list)

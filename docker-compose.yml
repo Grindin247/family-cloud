@@ -55,9 +55,8 @@ services:
     restart: unless-stopped
     environment:
       - DEFAULT_PROVIDER=oidc
-      # Use the same issuer hostname Keycloak advertises (must match discovery "issuer" exactly).
-      # We route this hostname back to the Keycloak container via Traefik over plain HTTP.
-      - PROVIDERS_OIDC_ISSUER_URL=http://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
+      # This must match Keycloak's advertised issuer exactly or the callback token check will fail.
+      - PROVIDERS_OIDC_ISSUER_URL=https://keycloak.${FAMILY_DOMAIN}/realms/${KEYCLOAK_REALM}
       - PROVIDERS_OIDC_CLIENT_ID=traefik-forward-auth
       - PROVIDERS_OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - SECRET=${FORWARD_AUTH_COOKIE_SECRET}
@@ -239,6 +238,9 @@ services:
       - NODE_ENV=production
       - NEXT_PUBLIC_FAMILY_DOMAIN=${FAMILY_DOMAIN}
       - NEXTCLOUD_BASE_URL=https://nextcloud.${FAMILY_DOMAIN}
+      - HOME_PORTAL_DECISION_API_BASE_URL=${HOME_PORTAL_DECISION_API_BASE_URL:-http://decision-api:8000/v1}
+      - HOME_PORTAL_FILE_AGENT_FAMILY_ID=${FILE_AGENT_FAMILY_ID:-2}
+      - HOME_PORTAL_FILE_AGENT_ACTOR=${FILE_AGENT_ACTOR:-mrjamescallender@gmail.com}
     command: sh -c "npm run build && npm run start"
     volumes:
       - ./secrets/nextcloud_mcp_username:/run/secrets/nextcloud_mcp_username:ro
@@ -557,6 +559,7 @@ services:
       - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
       - FAMILY_EVENT_API_BASE_URL=${FAMILY_EVENT_API_BASE_URL:-http://family-event-api:8000/v1}
       - FAMILY_EVENT_INTERNAL_ADMIN_TOKEN=${FAMILY_EVENT_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_SELF_API_BASE_URL=${DECISION_SELF_API_BASE_URL:-http://decision-api:8000/v1}
       - TASK_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
       - TASK_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
       - TASK_VIKUNJA_TOKEN_FILE=/run/secrets/vikunja_api_token
@@ -577,6 +580,9 @@ services:
       - DECISION_THRESHOLD_1_TO_5=${DECISION_THRESHOLD_1_TO_5:-4.0}
       - BUDGET_DEFAULT_QUARTERLY_ALLOCATION=${DECISION_BUDGET_DEFAULT_QUARTERLY_ALLOCATION:-100}
       - BUDGET_ROLLOVER_PERCENT=${DECISION_BUDGET_ROLLOVER_PERCENT:-0}
+      - NEXTCLOUD_MCP_URL=${NEXTCLOUD_MCP_URL:-http://nextcloud-mcp:8000/mcp}
+      - FILE_AGENT_NEW_DOC_IDLE_MINUTES=${FILE_AGENT_NEW_DOC_IDLE_MINUTES:-10}
+      - FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD=${FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD:-0.70}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     volumes:
       - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
@@ -716,6 +722,34 @@ services:
       familynet: {}
     volumes:
       - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+
+  family-event-web:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: ./apps/family-event-service/apps/web
+    environment:
+      - APP_ENV=prod
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_BASE_URL=/api/v1
+    command: sh -c "npm run build && npm run start"
+    networks:
+      decisionnet: {}
+
+  family-event-nginx:
+    image: nginx:1.27-alpine
+    profiles: ["decision"]
+    restart: unless-stopped
+    depends_on:
+      - family-event-api
+      - family-event-web
+    volumes:
+      - ./apps/family-event-service/infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      decisionnet: {}
+      familynet: {}
+    dns:
+      - 172.20.0.11
 
   education-db:
     profiles: ["decision"]

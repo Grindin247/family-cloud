@@ -134,7 +134,7 @@ upsert_service_client() {
 upsert_client \
   "traefik-forward-auth" \
   "$TRAEFIK_CLIENT_SECRET" \
-  "[\"http://auth.${DOMAIN}/_oauth\",\"https://auth.${DOMAIN}/_oauth\"]" \
+  "[\"http://auth.${DOMAIN}/_oauth\",\"https://auth.${DOMAIN}/_oauth\",\"http://decision.${DOMAIN}/*\",\"https://decision.${DOMAIN}/*\"]" \
   "[\"http://auth.${DOMAIN}\",\"https://auth.${DOMAIN}\"]"
 
 upsert_client \

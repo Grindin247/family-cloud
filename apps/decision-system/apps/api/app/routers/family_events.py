@@ -110,6 +110,10 @@ def get_events(
     tag: str | None = Query(default=None),
     subject_id: str | None = Query(default=None),
     actor_id: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
@@ -128,6 +132,10 @@ def get_events(
         tag=tag,
         subject_id=subject_id,
         actor_id=actor_id,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
         limit=limit,
@@ -142,6 +150,10 @@ def get_timeline(
     domains: list[str] = Query(default=[]),
     event_type: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
@@ -157,6 +169,10 @@ def get_timeline(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
         limit=limit,
@@ -170,6 +186,10 @@ def get_counts(
     domains: list[str] = Query(default=[]),
     event_type: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -184,6 +204,10 @@ def get_counts(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
     )
@@ -198,6 +222,10 @@ def get_time_series(
     domains: list[str] = Query(default=[]),
     event_type: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -216,6 +244,10 @@ def get_time_series(
             domains=domains,
             event_type=event_type,
             tag=tag,
+            actor_person_id=actor_person_id,
+            subject_person_id=subject_person_id,
+            scope_type=scope_type,
+            target_person_id=target_person_id,
             start=start,
             end=end,
         )
@@ -226,6 +258,14 @@ def get_time_series(
 @router.get("/analytics/domain-summary", response_model=list[DomainSummaryItem])
 def get_domain_summary(
     family_id: int = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -233,7 +273,20 @@ def get_domain_summary(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    return get_domain_activity_summary(db, family_id=family_id, start=start, end=end)
+    return get_domain_activity_summary(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+    )
 
 
 @router.get("/analytics/compare-periods", response_model=PeriodComparisonResponse)
@@ -248,6 +301,10 @@ def get_period_comparison(
     domains: list[str] = Query(default=[]),
     event_type: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     ctx: AuthContext | None = Depends(get_auth_context),
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
@@ -265,6 +322,10 @@ def get_period_comparison(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
     )
 
 
@@ -297,6 +358,14 @@ def get_sequences(
 @router.get("/analytics/top-tags", response_model=list[TopTagItem])
 def get_top_tags(
     family_id: int = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
@@ -305,12 +374,34 @@ def get_top_tags(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    return get_top_tags_or_topics(db, family_id=family_id, start=start, end=end, limit=limit)
+    return get_top_tags_or_topics(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+        limit=limit,
+    )
 
 
 @router.get("/analytics/data-quality", response_model=DataQualityResponse)
 def get_data_quality(
     family_id: int = Query(...),
+    domain: str | None = Query(default=None),
+    domains: list[str] = Query(default=[]),
+    event_type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    actor_person_id: str | None = Query(default=None),
+    subject_person_id: str | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    target_person_id: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -318,4 +409,17 @@ def get_data_quality(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
 ):
     _ensure_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user)
-    return get_data_quality_summary(db, family_id=family_id, start=start, end=end)
+    return get_data_quality_summary(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+    )

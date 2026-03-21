@@ -78,16 +78,48 @@ def _to_plan(op: PlannedOperation) -> _OperationPlan:
         _required(payload, ["family_id", "name", "description", "weight"], op_type)
         body = {
             "family_id": payload["family_id"],
+            "scope_type": payload.get("scope_type", "family"),
+            "owner_person_id": payload.get("owner_person_id"),
+            "visibility_scope": payload.get("visibility_scope"),
             "name": payload["name"],
             "description": payload["description"],
             "weight": payload["weight"],
             "action_types": payload.get("action_types", []),
-            "active": payload.get("active", True),
+            "status": payload.get("status", "active"),
+            "priority": payload.get("priority"),
+            "horizon": payload.get("horizon"),
+            "target_date": payload.get("target_date"),
+            "success_criteria": payload.get("success_criteria"),
+            "review_cadence_days": payload.get("review_cadence_days"),
+            "next_review_at": payload.get("next_review_at"),
+            "tags": payload.get("tags", []),
+            "external_refs": payload.get("external_refs", []),
         }
         return _OperationPlan(op_type, payload, "POST", "/goals", body, False, f"Create goal '{payload['name']}'")
     if op_type == "update_goal":
         _required(payload, ["goal_id"], op_type)
-        patch = {key: payload[key] for key in ["name", "description", "weight", "action_types", "active"] if key in payload}
+        patch = {
+            key: payload[key]
+            for key in [
+                "scope_type",
+                "owner_person_id",
+                "visibility_scope",
+                "name",
+                "description",
+                "weight",
+                "action_types",
+                "status",
+                "priority",
+                "horizon",
+                "target_date",
+                "success_criteria",
+                "review_cadence_days",
+                "next_review_at",
+                "tags",
+                "external_refs",
+            ]
+            if key in payload
+        }
         if not patch:
             raise ValueError("update_goal requires at least one mutable field")
         return _OperationPlan(op_type, payload, "PATCH", f"/goals/{payload['goal_id']}", patch, False, f"Update goal #{payload['goal_id']}")
@@ -165,7 +197,7 @@ def _to_plan(op: PlannedOperation) -> _OperationPlan:
             "threshold_1_to_5": payload["threshold_1_to_5"],
             "period_days": payload["period_days"],
             "default_allowance": payload["default_allowance"],
-            "member_allowances": payload.get("member_allowances", []),
+            "person_allowances": payload.get("person_allowances", []),
         }
         return _OperationPlan(op_type, payload, "PUT", f"/budgets/families/{family_id}/policy", body, False, f"Update budget policy for family #{family_id}")
     if op_type == "reset_budget_period":
@@ -248,14 +280,54 @@ class DecisionSystemTools:
     def list_family_features(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
         return self.http.request("GET", f"/families/{family_id}/features", headers=self._headers(actor_email)).result["items"]
 
-    def get_family_goals(self, family_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
-        return self.http.request("GET", "/goals", params={"family_id": family_id}, headers=self._headers(actor_email)).result["items"]
+    def get_family_goals(
+        self,
+        family_id: int,
+        *,
+        scope_type: str | None = None,
+        owner_person_id: str | None = None,
+        status: str | None = None,
+        include_deleted: bool = False,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"family_id": family_id, "include_deleted": include_deleted}
+        if scope_type is not None:
+            params["scope_type"] = scope_type
+        if owner_person_id is not None:
+            params["owner_person_id"] = owner_person_id
+        if status is not None:
+            params["status"] = status
+        return self.http.request("GET", "/goals", params=params, headers=self._headers(actor_email)).result["items"]
 
-    def list_decisions(self, family_id: int, *, include_scores: bool = False, actor_email: str | None = None) -> list[dict[str, Any]]:
+    def list_decisions(
+        self,
+        family_id: int,
+        *,
+        scope_type: str | None = None,
+        owner_person_id: str | None = None,
+        target_person_id: str | None = None,
+        goal_policy: str | None = None,
+        include_deleted: bool = False,
+        include_scores: bool = False,
+        actor_email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "family_id": family_id,
+            "include_scores": include_scores,
+            "include_deleted": include_deleted,
+        }
+        if scope_type is not None:
+            params["scope_type"] = scope_type
+        if owner_person_id is not None:
+            params["owner_person_id"] = owner_person_id
+        if target_person_id is not None:
+            params["target_person_id"] = target_person_id
+        if goal_policy is not None:
+            params["goal_policy"] = goal_policy
         return self.http.request(
             "GET",
             "/decisions",
-            params={"family_id": family_id, "include_scores": include_scores},
+            params=params,
             headers=self._headers(actor_email),
         ).result["items"]
 
@@ -267,6 +339,12 @@ class DecisionSystemTools:
 
     def get_decision(self, decision_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
         return self.http.request("GET", f"/decisions/{decision_id}", headers=self._headers(actor_email)).result
+
+    def get_decision_goal_context(self, decision_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
+        return self.http.request("GET", f"/decisions/{decision_id}/goal-context", headers=self._headers(actor_email)).result
+
+    def get_decision_score_runs(self, decision_id: int, *, actor_email: str | None = None) -> list[dict[str, Any]]:
+        return self.http.request("GET", f"/decisions/{decision_id}/score-runs", headers=self._headers(actor_email)).result["items"]
 
     def get_goal(self, goal_id: int, *, actor_email: str | None = None) -> dict[str, Any]:
         return self.http.request("GET", f"/goals/{goal_id}", headers=self._headers(actor_email)).result
@@ -283,6 +361,7 @@ class DecisionSystemTools:
         actor_email: str | None = None,
         owner_person_id: str | None = None,
         visibility_scope: str = "family",
+        source_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return self.http.request(
             "POST",
@@ -291,7 +370,7 @@ class DecisionSystemTools:
                 "family_id": family_id,
                 "type": type,
                 "text": text,
-                "source_refs": [],
+                "source_refs": source_refs or [],
                 "owner_person_id": owner_person_id,
                 "visibility_scope": visibility_scope,
             },

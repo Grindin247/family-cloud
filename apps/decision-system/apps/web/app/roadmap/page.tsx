@@ -1,11 +1,12 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { api, Decision, Family, RoadmapItem } from "../../lib/api";
+import { api, Decision, Family, Person, RoadmapItem } from "../../lib/api";
 
 export default function RoadmapPage() {
   const [families, setFamilies] = useState<Family[]>([]);
   const [familyId, setFamilyId] = useState<number | null>(null);
+  const [persons, setPersons] = useState<Person[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [items, setItems] = useState<RoadmapItem[]>([]);
   const [form, setForm] = useState({
@@ -25,11 +26,13 @@ export default function RoadmapPage() {
     setFamilyId(activeFamilyId);
     if (!activeFamilyId) return;
 
-    const [decisionData, roadmapData] = await Promise.all([
-      api.listDecisions(activeFamilyId, false),
+    const [personData, decisionData, roadmapData] = await Promise.all([
+      api.listFamilyPersons(activeFamilyId),
+      api.listDecisions(activeFamilyId, { include_scores: true }),
       api.listRoadmap(activeFamilyId),
     ]);
-    setDecisions(decisionData.items);
+    setPersons(personData.items);
+    setDecisions(decisionData.items.filter((decision) => !decision.deleted_at));
     setItems(roadmapData.items);
     setForm((prev) => ({ ...prev, decision_id: String(decisionData.items[0]?.id ?? "") }));
   }
@@ -43,9 +46,8 @@ export default function RoadmapPage() {
     void refresh(familyId).catch((err) => setError(err instanceof Error ? err.message : "Failed to refresh roadmap"));
   }, [familyId]);
 
-  const decisionTitleMap = useMemo(() => {
-    return new Map(decisions.map((decision) => [decision.id, decision.title]));
-  }, [decisions]);
+  const decisionMap = useMemo(() => new Map(decisions.map((decision) => [decision.id, decision])), [decisions]);
+  const personMap = useMemo(() => new Map(persons.map((person) => [person.person_id, person.display_name])), [persons]);
 
   async function onCreate(event: FormEvent) {
     event.preventDefault();
@@ -80,7 +82,7 @@ export default function RoadmapPage() {
       <div className="page-head">
         <div>
           <h2 className="page-title">Roadmap</h2>
-          <p className="page-sub">Turn approved decisions into a practical timeline with clear status tracking.</p>
+          <p className="page-sub">Schedule scoped decisions and keep family and personal execution plans in one timeline.</p>
         </div>
         <div style={{ minWidth: 220 }}>
           <label>Family</label>
@@ -100,7 +102,9 @@ export default function RoadmapPage() {
           <form className="stack" onSubmit={onCreate}>
             <select value={form.decision_id} onChange={(e) => setForm({ ...form, decision_id: e.target.value })} required>
               {decisions.map((decision) => (
-                <option key={decision.id} value={decision.id}>{decision.title}</option>
+                <option key={decision.id} value={decision.id}>
+                  {decision.title} ({decision.scope_type === "family" ? "Family" : personMap.get(decision.target_person_id ?? "") ?? "Personal"})
+                </option>
               ))}
             </select>
             <div className="row">
@@ -121,7 +125,7 @@ export default function RoadmapPage() {
                 checked={form.use_discretionary_budget}
                 onChange={(e) => setForm({ ...form, use_discretionary_budget: e.target.checked })}
               />{" "}
-              Use discretionary budget if score is below threshold
+              Use discretionary budget if the latest score is below threshold
             </label>
             <button className="btn-primary" type="submit">Create Roadmap Item</button>
           </form>
@@ -130,20 +134,28 @@ export default function RoadmapPage() {
         <div className="card">
           <h3>Current Plan</h3>
           <div className="list">
-            {items.map((item) => (
-              <div className="item stack" key={item.id}>
-                <strong>{decisionTitleMap.get(item.decision_id) ?? `Decision #${item.decision_id}`}</strong>
-                <div style={{ color: "#6a645d" }}>Bucket: {item.bucket}</div>
-                <div className="row">
-                  <select value={item.status} onChange={(e) => void onStatusChange(item, e.target.value)}>
-                    <option value="Scheduled">Scheduled</option>
-                    <option value="In-Progress">In-Progress</option>
-                    <option value="Done">Done</option>
-                  </select>
-                  <button className="btn-secondary" type="button" onClick={() => void onDelete(item.id)}>Remove</button>
+            {items.map((item) => {
+              const decision = decisionMap.get(item.decision_id);
+              return (
+                <div className="item stack" key={item.id}>
+                  <strong>{decision?.title ?? `Decision #${item.decision_id}`}</strong>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <span className="badge">{decision?.scope_type === "family" ? "Family" : "Personal"}</span>
+                    {decision?.target_person_id && <span className="badge">For {personMap.get(decision.target_person_id) ?? "Unknown"}</span>}
+                    {decision?.latest_score_run && <span className="score">{decision.latest_score_run.weighted_total_1_to_5}/5</span>}
+                  </div>
+                  <div style={{ color: "#6a645d" }}>Bucket: {item.bucket}</div>
+                  <div className="row">
+                    <select value={item.status} onChange={(e) => void onStatusChange(item, e.target.value)}>
+                      <option value="Scheduled">Scheduled</option>
+                      <option value="In-Progress">In-Progress</option>
+                      <option value="Done">Done</option>
+                    </select>
+                    <button className="btn-secondary" type="button" onClick={() => void onDelete(item.id)}>Remove</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {items.length === 0 && <div className="item">No roadmap items yet.</div>}
           </div>
         </div>

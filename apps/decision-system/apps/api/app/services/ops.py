@@ -16,7 +16,7 @@ from app.models.entities import (
     AgentUsageEvent,
     BudgetPolicy,
     Decision,
-    DecisionScore,
+    DecisionScoreRun,
     Goal,
     RoadmapItem,
 )
@@ -399,6 +399,7 @@ def record_agent_event(
     value_number: float | None = None,
     payload: dict[str, Any] | None = None,
     created_at: datetime | None = None,
+    emit_canonical: bool = True,
 ) -> dict[str, Any]:
     ts = created_at or _utcnow()
     payload_data = payload or {}
@@ -431,6 +432,8 @@ def record_agent_event(
     db.flush()
     result = {"usage_event_id": usage.id, "playback_event_id": playback.id}
 
+    if not emit_canonical:
+        return result
     canonical = _legacy_agent_event_to_canonical(
         family_id=family_id,
         domain=domain,
@@ -442,16 +445,14 @@ def record_agent_event(
         payload=payload_data,
         created_at=ts,
     )
-    if canonical is None:
-        return result
-
-    canonical["legacy_usage_event_id"] = usage.id
-    canonical["legacy_playback_event_id"] = playback.id
-    try:
-        result["canonical_event_id"] = _post_canonical_event(canonical)
-    except Exception as exc:
-        result["canonical_event_id"] = None
-        result["canonical_error"] = str(exc)
+    if canonical is not None:
+        canonical["legacy_usage_event_id"] = usage.id
+        canonical["legacy_playback_event_id"] = playback.id
+        try:
+            result["canonical_event_id"] = _post_canonical_event(canonical)
+        except Exception as exc:
+            result["canonical_event_id"] = None
+            result["canonical_error"] = str(exc)
     return result
 
 
@@ -662,10 +663,18 @@ def query_metrics(
     deleted_count = db.execute(select(func.count()).select_from(usage_base).where(usage_base.c.event_type == "decision_deleted")).scalar_one()
     add("decision_deleted_count", float(deleted_count))
 
-    avg_score = db.execute(select(func.avg(usage_base.c.value_number)).where(usage_base.c.event_type == "decision_scored")).scalar_one()
+    avg_score = db.execute(
+        select(func.avg(usage_base.c.value_number)).where(
+            usage_base.c.event_type.in_(["decision_score_calculated", "decision_scored"])
+        )
+    ).scalar_one()
     add("decision_avg_score", float(avg_score or 0.0), unit="score")
 
-    below_threshold_count = db.execute(select(func.count()).select_from(usage_base).where(usage_base.c.event_type == "decision_below_threshold")).scalar_one()
+    below_threshold_count = db.execute(
+        select(func.count()).select_from(usage_base).where(
+            usage_base.c.event_type.in_(["decision_score_below_threshold", "decision_below_threshold"])
+        )
+    ).scalar_one()
     add("decisions_below_threshold_count", float(below_threshold_count))
 
     goal_updates_count = db.execute(select(func.count()).select_from(usage_base).where(usage_base.c.event_type.in_(["goal_created", "goal_updated", "goal_deleted"]))).scalar_one()
@@ -781,21 +790,22 @@ def get_playback_timeline(
 
 
 def latest_decision_health_snapshot(db: Session, *, family_id: int) -> dict[str, Any]:
-    decisions = db.execute(select(Decision).where(Decision.family_id == family_id)).scalars().all()
-    goals = db.execute(select(Goal).where(Goal.family_id == family_id)).scalars().all()
-    roadmap_rows = db.execute(select(RoadmapItem, Decision).join(Decision, Decision.id == RoadmapItem.decision_id).where(Decision.family_id == family_id)).all()
-
-    score_totals: dict[int, float] = {}
-    score_counts: dict[int, int] = {}
-    score_rows = db.execute(
-        select(DecisionScore.decision_id, DecisionScore.score_1_to_5).join(Decision, Decision.id == DecisionScore.decision_id).where(
-            Decision.family_id == family_id,
-            Decision.version == DecisionScore.version,
-        )
+    decisions = db.execute(select(Decision).where(Decision.family_id == family_id, Decision.deleted_at.is_(None))).scalars().all()
+    goals = db.execute(select(Goal).where(Goal.family_id == family_id, Goal.deleted_at.is_(None))).scalars().all()
+    roadmap_rows = db.execute(
+        select(RoadmapItem, Decision)
+        .join(Decision, Decision.id == RoadmapItem.decision_id)
+        .where(Decision.family_id == family_id, Decision.deleted_at.is_(None))
     ).all()
-    for decision_id, score in score_rows:
-        score_totals[int(decision_id)] = score_totals.get(int(decision_id), 0.0) + float(score)
-        score_counts[int(decision_id)] = score_counts.get(int(decision_id), 0) + 1
+
+    latest_runs: dict[int, DecisionScoreRun] = {}
+    score_rows = db.execute(
+        select(DecisionScoreRun)
+        .where(DecisionScoreRun.family_id == family_id)
+        .order_by(DecisionScoreRun.decision_id.asc(), DecisionScoreRun.created_at.desc(), DecisionScoreRun.id.desc())
+    ).scalars().all()
+    for row in score_rows:
+        latest_runs.setdefault(int(row.decision_id), row)
 
     policy = db.execute(select(BudgetPolicy).where(BudgetPolicy.family_id == family_id)).scalar_one_or_none()
 
@@ -812,8 +822,10 @@ def latest_decision_health_snapshot(db: Session, *, family_id: int) -> dict[str,
                 "status": item.status.value,
                 "target_date": item.target_date.isoformat() if item.target_date else None,
                 "urgency": item.urgency,
-                "score_average": round(score_totals[item.id] / score_counts[item.id], 3) if score_counts.get(item.id) else None,
+                "score_average": latest_runs[item.id].weighted_total_1_to_5 if item.id in latest_runs else None,
                 "version": item.version,
+                "scope_type": item.scope_type.value,
+                "target_person_id": str(item.target_person_id) if item.target_person_id is not None else None,
             }
             for item in decisions
         ],
@@ -822,7 +834,9 @@ def latest_decision_health_snapshot(db: Session, *, family_id: int) -> dict[str,
                 "id": goal.id,
                 "name": goal.name,
                 "weight": goal.weight,
-                "active": goal.active,
+                "status": goal.status.value,
+                "scope_type": goal.scope_type.value,
+                "owner_person_id": str(goal.owner_person_id) if goal.owner_person_id is not None else None,
             }
             for goal in goals
         ],

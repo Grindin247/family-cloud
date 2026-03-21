@@ -92,6 +92,10 @@ def _query_family_event_rows(
     tag: str | None = None,
     subject_id: str | None = None,
     actor_id: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[FamilyEventRecord]:
@@ -107,15 +111,24 @@ def _query_family_event_rows(
         query = query.where(FamilyEventRecord.subject_id == subject_id)
     if actor_id:
         query = query.where(FamilyEventRecord.actor_id == actor_id)
+    if actor_person_id:
+        query = query.where(FamilyEventRecord.actor_person_id == actor_person_id)
+    if subject_person_id:
+        query = query.where(FamilyEventRecord.subject_person_id == subject_person_id)
     if start:
         query = query.where(FamilyEventRecord.occurred_at >= start)
     if end:
         query = query.where(FamilyEventRecord.occurred_at <= end)
     rows = db.execute(query.order_by(FamilyEventRecord.occurred_at.desc())).scalars().all()
-    if not tag:
-        return rows
-    needle = tag.strip().lower()
-    return [row for row in rows if needle in {str(item).strip().lower() for item in _json_loads(row.tags_json, [])}]
+    filtered = rows
+    if tag:
+        needle = tag.strip().lower()
+        filtered = [row for row in filtered if needle in {str(item).strip().lower() for item in _json_loads(row.tags_json, [])}]
+    if scope_type:
+        filtered = [row for row in filtered if str((_json_loads(row.payload_json, {}) or {}).get("scope_type") or "").strip().lower() == scope_type.strip().lower()]
+    if target_person_id:
+        filtered = [row for row in filtered if str((_json_loads(row.payload_json, {}) or {}).get("target_person_id") or "").strip() == target_person_id.strip()]
+    return filtered
 
 
 def _filter_event_dicts(
@@ -138,6 +151,12 @@ def _filter_event_dicts(
         elif metric == "tasks.overdue.count" and event_type == "task.overdue":
             filtered.append(row)
         elif metric == "decisions.created.count" and event_type == "decision.created":
+            filtered.append(row)
+        elif metric == "decisions.completed.count" and event_type == "decision.completed":
+            filtered.append(row)
+        elif metric == "decisions.below_threshold.count" and event_type == "decision.score_below_threshold":
+            filtered.append(row)
+        elif metric == "goals.updated.count" and event_type in {"goal.created", "goal.updated", "goal.deleted"}:
             filtered.append(row)
         elif metric == "church.notes.count" and event_type == "note.created" and (payload.get("note_type") == "church" or "church" in row.get("tags", [])):
             filtered.append(row)
@@ -229,11 +248,18 @@ def _validate_domain_payload(event: dict[str, Any]) -> None:
 def _title_and_summary(event_type: str, payload: dict[str, Any], domain: str) -> tuple[str, str]:
     subject_name = str(payload.get("title") or payload.get("name") or payload.get("path") or payload.get("note_type") or domain).strip()
     mapping = {
+        "goal.created": ("Goal created", f"Goal created: {subject_name}"),
+        "goal.updated": ("Goal updated", f"Goal updated: {subject_name}"),
+        "goal.deleted": ("Goal deleted", f"Goal deleted: {subject_name}"),
         "decision.created": ("Decision created", f"Decision created: {subject_name}"),
         "decision.updated": ("Decision updated", f"Decision updated: {subject_name}"),
         "decision.score_calculated": ("Decision scored", f"Decision scored for {subject_name}"),
+        "decision.score_above_threshold": ("Decision above threshold", f"Decision cleared threshold: {subject_name}"),
+        "decision.score_below_threshold": ("Decision below threshold", f"Decision fell below threshold: {subject_name}"),
         "decision.approved": ("Decision approved", f"Decision approved: {subject_name}"),
         "decision.rejected": ("Decision rejected", f"Decision rejected: {subject_name}"),
+        "decision.deleted": ("Decision deleted", f"Decision deleted: {subject_name}"),
+        "decision.completed": ("Decision completed", f"Decision completed: {subject_name}"),
         "task.created": ("Task created", f"Task created: {subject_name}"),
         "task.updated": ("Task updated", f"Task updated: {subject_name}"),
         "task.assigned": ("Task assigned", f"Task assigned: {subject_name}"),
@@ -399,6 +425,10 @@ def list_family_events(
     tag: str | None = None,
     subject_id: str | None = None,
     actor_id: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 100,
@@ -413,6 +443,10 @@ def list_family_events(
         tag=tag,
         subject_id=subject_id,
         actor_id=actor_id,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
     )
@@ -427,6 +461,10 @@ def build_timeline(
     domains: list[str] | None = None,
     event_type: str | None = None,
     tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 100,
@@ -438,6 +476,10 @@ def build_timeline(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
         limit=limit,
@@ -454,6 +496,10 @@ def query_counts(
     domains: list[str] | None = None,
     event_type: str | None = None,
     tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -464,6 +510,10 @@ def query_counts(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
         limit=5000,
@@ -476,6 +526,9 @@ def query_counts(
         "tasks.completed.count": 0.0,
         "tasks.overdue.count": 0.0,
         "decisions.created.count": 0.0,
+        "decisions.completed.count": 0.0,
+        "decisions.below_threshold.count": 0.0,
+        "goals.updated.count": 0.0,
         "decision.goal_alignment.avg": 0.0,
         "church.notes.count": 0.0,
     }
@@ -495,6 +548,12 @@ def query_counts(
             metrics["tasks.overdue.count"] += 1.0
         elif row["event_type"] == "decision.created":
             metrics["decisions.created.count"] += 1.0
+        elif row["event_type"] == "decision.completed":
+            metrics["decisions.completed.count"] += 1.0
+        elif row["event_type"] == "decision.score_below_threshold":
+            metrics["decisions.below_threshold.count"] += 1.0
+        elif row["event_type"] in {"goal.created", "goal.updated", "goal.deleted"}:
+            metrics["goals.updated.count"] += 1.0
         elif row["event_type"] == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
             try:
                 score_values.append(float(payload["score_value"]))
@@ -515,6 +574,10 @@ def query_time_series(
     domains: list[str] | None = None,
     event_type: str | None = None,
     tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -527,6 +590,10 @@ def query_time_series(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=start,
         end=end,
         limit=5000,
@@ -557,6 +624,12 @@ def query_time_series(
             increment = 1.0
         elif metric == "decisions.created.count" and row["event_type"] == "decision.created":
             increment = 1.0
+        elif metric == "decisions.completed.count" and row["event_type"] == "decision.completed":
+            increment = 1.0
+        elif metric == "decisions.below_threshold.count" and row["event_type"] == "decision.score_below_threshold":
+            increment = 1.0
+        elif metric == "goals.updated.count" and row["event_type"] in {"goal.created", "goal.updated", "goal.deleted"}:
+            increment = 1.0
         elif metric == "church.notes.count" and row["event_type"] == "note.created" and (payload.get("note_type") == "church" or "church" in row.get("tags", [])):
             increment = 1.0
         elif metric == "decision.goal_alignment.avg" and row["event_type"] == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
@@ -581,10 +654,33 @@ def get_domain_activity_summary(
     db: Session,
     *,
     family_id: int,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+        limit=10000,
+        offset=0,
+    )
     grouped: dict[str, dict[str, Any]] = {}
     for domain in KNOWN_DOMAINS:
         grouped[domain] = {
@@ -635,6 +731,10 @@ def compare_periods(
     domains: list[str] | None = None,
     event_type: str | None = None,
     tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
 ) -> dict[str, Any]:
     current_events = list_family_events(
         db,
@@ -643,6 +743,10 @@ def compare_periods(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=current_start,
         end=current_end,
         limit=10000,
@@ -655,6 +759,10 @@ def compare_periods(
         domains=domains,
         event_type=event_type,
         tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
         start=baseline_start,
         end=baseline_end,
         limit=10000,
@@ -724,11 +832,34 @@ def get_top_tags_or_topics(
     db: Session,
     *,
     family_id: int,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+        limit=10000,
+        offset=0,
+    )
     counter: Counter[tuple[str, str]] = Counter()
     for row in rows:
         for tag in row.get("tags", []):
@@ -748,10 +879,33 @@ def get_data_quality_summary(
     db: Session,
     *,
     family_id: int,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    actor_person_id: str | None = None,
+    subject_person_id: str | None = None,
+    scope_type: str | None = None,
+    target_person_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> dict[str, Any]:
-    rows = list_family_events(db, family_id=family_id, start=start, end=end, limit=10000, offset=0)
+    rows = list_family_events(
+        db,
+        family_id=family_id,
+        domain=domain,
+        domains=domains,
+        event_type=event_type,
+        tag=tag,
+        actor_person_id=actor_person_id,
+        subject_person_id=subject_person_id,
+        scope_type=scope_type,
+        target_person_id=target_person_id,
+        start=start,
+        end=end,
+        limit=10000,
+        offset=0,
+    )
     domain_counts = Counter(row["domain"] for row in rows)
     sparse_domains = [
         {"domain": domain, "count": count, "sparse": count < 3}

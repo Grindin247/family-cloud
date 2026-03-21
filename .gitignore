@@ -221,3 +221,38 @@ backup-users.db
 # Never commit private keys
 certs/*.key
 .venv-test/
+
+# Node / web dependencies and build outputs
+node_modules/
+**/node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.parcel-cache/
+.turbo/
+**/.turbo/
+.cache/
+**/.cache/
+
+# Framework build artifacts
+.next/
+**/.next/
+out/
+**/out/
+.nuxt/
+**/.nuxt/
+.svelte-kit/
+**/.svelte-kit/
+.astro/
+**/.astro/
+.vercel/
+**/.vercel/
+
+# Frontend build/test artifacts
+coverage/
+**/coverage/
+dist/
+**/dist/
+*.tsbuildinfo
+.eslintcache

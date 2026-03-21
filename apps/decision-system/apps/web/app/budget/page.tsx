@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, BudgetSummary, Family } from "../../lib/api";
 
-type MemberAllowanceDraft = Record<number, string>;
+type PersonAllowanceDraft = Record<string, string>;
 
 function fmtDate(value: string): string {
   const date = new Date(`${value}T12:00:00`);
@@ -17,7 +17,7 @@ export default function BudgetPage() {
   const [threshold, setThreshold] = useState("4.0");
   const [periodDays, setPeriodDays] = useState("90");
   const [defaultAllowance, setDefaultAllowance] = useState("2");
-  const [memberAllowances, setMemberAllowances] = useState<MemberAllowanceDraft>({});
+  const [personAllowances, setPersonAllowances] = useState<PersonAllowanceDraft>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -37,9 +37,9 @@ export default function BudgetPage() {
     setThreshold(String(budget.threshold_1_to_5));
     setPeriodDays(String(budget.period_days));
     setDefaultAllowance(String(budget.default_allowance));
-    setMemberAllowances(
-      budget.members.reduce<MemberAllowanceDraft>((acc, member) => {
-        acc[member.member_id] = String(member.allowance);
+    setPersonAllowances(
+      budget.members.reduce<PersonAllowanceDraft>((acc, person) => {
+        acc[person.person_id] = String(person.allowance);
         return acc;
       }, {}),
     );
@@ -64,9 +64,9 @@ export default function BudgetPage() {
         threshold_1_to_5: Number(threshold),
         period_days: Number(periodDays),
         default_allowance: Number(defaultAllowance),
-        member_allowances: summary.members.map((member) => ({
-          member_id: member.member_id,
-          allowance: Number(memberAllowances[member.member_id] ?? defaultAllowance),
+        person_allowances: summary.members.map((person) => ({
+          person_id: person.person_id,
+          allowance: Number(personAllowances[person.person_id] ?? defaultAllowance),
         })),
       });
       setSummary(next);
@@ -94,9 +94,9 @@ export default function BudgetPage() {
 
   const totals = useMemo(() => {
     const members = summary?.members ?? [];
-    const totalAllowance = members.reduce((sum, member) => sum + member.allowance, 0);
-    const used = members.reduce((sum, member) => sum + member.used, 0);
-    const remaining = members.reduce((sum, member) => sum + member.remaining, 0);
+    const totalAllowance = members.reduce((sum, person) => sum + person.allowance, 0);
+    const used = members.reduce((sum, person) => sum + person.used, 0);
+    const remaining = members.reduce((sum, person) => sum + person.remaining, 0);
     const usedPct = totalAllowance > 0 ? Math.round((used / totalAllowance) * 100) : 0;
     return { totalAllowance, used, remaining, usedPct };
   }, [summary]);
@@ -105,8 +105,8 @@ export default function BudgetPage() {
     <section>
       <div className="page-head">
         <div>
-          <h2 className="page-title">Budget</h2>
-          <p className="page-sub">Control discretionary scheduling allowance for below-threshold decisions.</p>
+          <h2 className="page-title">Discretionary Budget</h2>
+          <p className="page-sub">Manage below-threshold scheduling capacity per person instead of per legacy family member.</p>
         </div>
         <div style={{ minWidth: 220 }}>
           <label>Family</label>
@@ -139,7 +139,7 @@ export default function BudgetPage() {
                 </div>
               </div>
               <div>
-                <label>Default Allowance Per Member (decisions per period)</label>
+                <label>Default Allowance Per Person</label>
                 <input
                   type="number"
                   min="0"
@@ -150,23 +150,23 @@ export default function BudgetPage() {
                 />
               </div>
               <div className="item">
-                <strong>Per-Member Allowance Overrides</strong>
+                <strong>Per-Person Overrides</strong>
                 <div className="list" style={{ marginTop: 10 }}>
-                  {summary.members.map((member) => (
-                    <div className="row" key={member.member_id}>
+                  {summary.members.map((person) => (
+                    <div className="row" key={person.person_id}>
                       <div>
-                        {member.display_name} <span className="badge">{member.role}</span>
+                        {person.display_name} <span className="badge">{person.role}</span>
                       </div>
                       <input
                         type="number"
                         min="0"
                         max="50"
                         step="1"
-                        value={memberAllowances[member.member_id] ?? ""}
+                        value={personAllowances[person.person_id] ?? ""}
                         onChange={(e) =>
-                          setMemberAllowances((prev) => ({
+                          setPersonAllowances((prev) => ({
                             ...prev,
-                            [member.member_id]: e.target.value,
+                            [person.person_id]: e.target.value,
                           }))
                         }
                       />
@@ -188,7 +188,7 @@ export default function BudgetPage() {
           <div className="card">
             <h3>Current Period Usage</h3>
             <div style={{ color: "#6a645d", marginBottom: 10 }}>
-              {fmtDate(summary.period_start_date)} to {fmtDate(summary.period_end_date)} (no rollover)
+              {fmtDate(summary.period_start_date)} to {fmtDate(summary.period_end_date)}
             </div>
             <div className="budget-progress">
               <div className="budget-progress-fill" style={{ width: `${Math.min(totals.usedPct, 100)}%` }} />
@@ -199,19 +199,19 @@ export default function BudgetPage() {
             <div style={{ marginTop: 4, color: "#6a645d" }}>Remaining {totals.remaining}</div>
 
             <div className="list" style={{ marginTop: 12 }}>
-              {summary.members.map((member) => {
-                const usedPct = member.allowance > 0 ? Math.round((member.used / member.allowance) * 100) : 0;
+              {summary.members.map((person) => {
+                const usedPct = person.allowance > 0 ? Math.round((person.used / person.allowance) * 100) : 0;
                 return (
-                  <div className="item" key={member.member_id}>
+                  <div className="item" key={person.person_id}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                      <strong>{member.display_name}</strong>
-                      <span className="badge">{member.role}</span>
+                      <strong>{person.display_name}</strong>
+                      <span className="badge">{person.role}</span>
                     </div>
                     <div className="budget-progress" style={{ marginTop: 8 }}>
                       <div className="budget-progress-fill" style={{ width: `${Math.min(usedPct, 100)}%` }} />
                     </div>
                     <div style={{ marginTop: 8, color: "#6a645d" }}>
-                      {member.used} used / {member.allowance} allowance, {member.remaining} remaining
+                      {person.used} used / {person.allowance} allowance, {person.remaining} remaining
                     </div>
                   </div>
                 );
@@ -223,4 +223,3 @@ export default function BudgetPage() {
     </section>
   );
 }
-

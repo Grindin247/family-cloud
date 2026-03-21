@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import app.routers.file_inbox as file_inbox_router
+
 from app.models.entities import Family, FamilyMember, RoleEnum
 
 
@@ -70,3 +72,59 @@ def test_file_index_and_search(client, db_session):
     assert item["item_type"] == "document"
     assert item["file_id"] == "file-1"
     assert item["match_reasons"]
+
+
+def test_process_inbox_endpoint_returns_summary_shape(client, db_session, monkeypatch):
+    family = _seed_family(db_session)
+    captured: dict[str, object] = {}
+
+    async def _fake_process_inbox_async(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "processed": 2,
+            "indexed": 2,
+            "unfiled": 0,
+            "skipped_locked": 1,
+            "skipped_recent": 1,
+            "conflicts": [],
+            "results": [
+                {
+                    "source_path": "/Notes/Inbox/Family Cloud Doc 2026-03-20 10-00-00.md",
+                    "destination_path": "/Notes/Projects/2026-03-20_100000_kitchen-remodel-notes.md",
+                    "title": "Kitchen Remodel Notes",
+                    "folder": "Projects",
+                    "item_type": "note",
+                    "confidence": 0.93,
+                    "indexed": True,
+                    "unreadable": False,
+                    "reason": "dashboard-doc:keyword-score:projects=2",
+                    "nextcloud_url": "https://nextcloud.example/apps/files/files/Notes/Projects/2026-03-20_100000_kitchen-remodel-notes.md",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(file_inbox_router, "process_inbox_async", _fake_process_inbox_async)
+
+    response = client.post(
+        f"/v1/family/{family.id}/files/process-inbox",
+        headers={"X-Dev-User": "u@example.com"},
+        json={
+            "include_dashboard_docs": True,
+            "respect_idle_window": True,
+            "source": "home-portal",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["processed"] == 2
+    assert body["indexed"] == 2
+    assert body["skipped_locked"] == 1
+    assert body["skipped_recent"] == 1
+    assert body["results"][0]["title"] == "Kitchen Remodel Notes"
+    assert body["results"][0]["nextcloud_url"].startswith("https://nextcloud.example/")
+    assert captured["actor"] == "u@example.com"
+    assert captured["family_id"] == family.id
+    assert captured["include_dashboard_docs"] is True

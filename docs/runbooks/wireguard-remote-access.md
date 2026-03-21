@@ -29,7 +29,7 @@ docker compose up -d
 
 - You can forward one UDP port from the router to the Family-Cloud host.
 - Remote devices can install a WireGuard client.
-- You are comfortable distributing the local wildcard certificate to remote devices if you want browser warnings to disappear.
+- You are comfortable distributing the local wildcard certificate to remote devices if you want browser warnings to disappear, after confirming Traefik is serving that wildcard cert instead of `TRAEFIK DEFAULT CERT`.
 
 ## Environment
 
@@ -125,6 +125,7 @@ From a remote device connected to WireGuard:
 - resolve `nextcloud.${FAMILY_DOMAIN}` through the VPN DNS path
 - open `https://nextcloud.${FAMILY_DOMAIN}`
 - open `https://tasks.${FAMILY_DOMAIN}`
+- inspect the served certificate and confirm the subject is `CN=*.${FAMILY_DOMAIN}`, not `TRAEFIK DEFAULT CERT`
 - confirm traffic to normal public internet sites still exits locally on the client
 - confirm only LAN and VPN subnet routes go through WireGuard
 
@@ -158,6 +159,11 @@ If the tunnel connects but home services do not resolve:
 - confirm `WIREGUARD_DNS` points to the Family-Cloud DNS host IP
 - confirm the remote device accepted the VPN DNS setting
 - confirm the router and client are not overriding DNS
+
+If HTTPS resolves but the browser shows `TRAEFIK DEFAULT CERT`:
+- Traefik is not loading the generated wildcard cert
+- verify the dynamic Traefik config references `/certs/wildcard.${FAMILY_DOMAIN}.crt` and `/certs/wildcard.${FAMILY_DOMAIN}.key`
+- restart Traefik with `docker compose up -d traefik` before troubleshooting client-side trust
 
 If the tunnel never connects:
 - confirm `WIREGUARD_PUBLIC_HOST` is correct

@@ -1,14 +1,26 @@
-def test_roadmap_requires_threshold_or_discretionary_budget(client):
-    family = client.post("/v1/families", json={"name": "Roadmap Family"}).json()
+def _seed_family_member_and_person(client, *, family_name: str, email: str, display_name: str):
+    family = client.post("/v1/families", json={"name": family_name}).json()
     member = client.post(
         f"/v1/families/{family['id']}/members",
-        json={"email": "roadmap@example.com", "display_name": "Planner", "role": "editor"},
+        json={"email": email, "display_name": display_name, "role": "admin"},
     ).json()
+    persons = client.get(f"/v1/families/{family['id']}/persons").json()["items"]
+    person = next(item for item in persons if item["legacy_member_id"] == member["id"])
+    return family, member, person
+
+
+def test_roadmap_requires_threshold_or_discretionary_budget(client):
+    family, _, person = _seed_family_member_and_person(
+        client,
+        family_name="Roadmap Family",
+        email="roadmap@example.com",
+        display_name="Planner",
+    )
     decision = client.post(
         "/v1/decisions",
         json={
             "family_id": family["id"],
-            "created_by_member_id": member["id"],
+            "created_by_person_id": person["person_id"],
             "title": "Quarterly planning",
             "description": "Plan priorities",
         },
@@ -55,11 +67,12 @@ def test_roadmap_requires_threshold_or_discretionary_budget(client):
 
 
 def test_roadmap_discretionary_budget_limit_enforced(client):
-    family = client.post("/v1/families", json={"name": "Budget Limited Family"}).json()
-    member = client.post(
-        f"/v1/families/{family['id']}/members",
-        json={"email": "limit@example.com", "display_name": "Limiter", "role": "editor"},
-    ).json()
+    family, _, person = _seed_family_member_and_person(
+        client,
+        family_name="Budget Limited Family",
+        email="limit@example.com",
+        display_name="Limiter",
+    )
 
     policy_update = client.put(
         f"/v1/budgets/families/{family['id']}/policy",
@@ -67,7 +80,7 @@ def test_roadmap_discretionary_budget_limit_enforced(client):
             "threshold_1_to_5": 4.0,
             "period_days": 30,
             "default_allowance": 1,
-            "member_allowances": [{"member_id": member["id"], "allowance": 1}],
+            "person_allowances": [{"person_id": person["person_id"], "allowance": 1}],
         },
     )
     assert policy_update.status_code == 200
@@ -76,7 +89,7 @@ def test_roadmap_discretionary_budget_limit_enforced(client):
         "/v1/decisions",
         json={
             "family_id": family["id"],
-            "created_by_member_id": member["id"],
+            "created_by_person_id": person["person_id"],
             "title": "Need Work A",
             "description": "Below threshold decision A",
         },
@@ -85,7 +98,7 @@ def test_roadmap_discretionary_budget_limit_enforced(client):
         "/v1/decisions",
         json={
             "family_id": family["id"],
-            "created_by_member_id": member["id"],
+            "created_by_person_id": person["person_id"],
             "title": "Need Work B",
             "description": "Below threshold decision B",
         },
@@ -118,11 +131,12 @@ def test_roadmap_discretionary_budget_limit_enforced(client):
 
 
 def test_unschedule_before_done_refunds_discretionary_budget(client):
-    family = client.post("/v1/families", json={"name": "Refund Family"}).json()
-    member = client.post(
-        f"/v1/families/{family['id']}/members",
-        json={"email": "refund@example.com", "display_name": "Refunder", "role": "editor"},
-    ).json()
+    family, _, person = _seed_family_member_and_person(
+        client,
+        family_name="Refund Family",
+        email="refund@example.com",
+        display_name="Refunder",
+    )
 
     client.put(
         f"/v1/budgets/families/{family['id']}/policy",
@@ -130,7 +144,7 @@ def test_unschedule_before_done_refunds_discretionary_budget(client):
             "threshold_1_to_5": 4.0,
             "period_days": 30,
             "default_allowance": 2,
-            "member_allowances": [{"member_id": member["id"], "allowance": 2}],
+            "person_allowances": [{"person_id": person["person_id"], "allowance": 2}],
         },
     )
 
@@ -138,7 +152,7 @@ def test_unschedule_before_done_refunds_discretionary_budget(client):
         "/v1/decisions",
         json={
             "family_id": family["id"],
-            "created_by_member_id": member["id"],
+            "created_by_person_id": person["person_id"],
             "title": "Refundable decision",
             "description": "Should refund when unscheduled",
         },
@@ -158,25 +172,26 @@ def test_unschedule_before_done_refunds_discretionary_budget(client):
     roadmap_id = scheduled.json()["id"]
 
     mid_summary = client.get(f"/v1/budgets/families/{family['id']}").json()
-    member_summary = next(item for item in mid_summary["members"] if item["member_id"] == member["id"])
-    assert member_summary["used"] == 1
-    assert member_summary["remaining"] == 1
+    person_summary = next(item for item in mid_summary["members"] if item["person_id"] == person["person_id"])
+    assert person_summary["used"] == 1
+    assert person_summary["remaining"] == 1
 
     deleted = client.delete(f"/v1/roadmap/{roadmap_id}")
     assert deleted.status_code == 204
 
     final_summary = client.get(f"/v1/budgets/families/{family['id']}").json()
-    member_summary = next(item for item in final_summary["members"] if item["member_id"] == member["id"])
-    assert member_summary["used"] == 0
-    assert member_summary["remaining"] == 2
+    person_summary = next(item for item in final_summary["members"] if item["person_id"] == person["person_id"])
+    assert person_summary["used"] == 0
+    assert person_summary["remaining"] == 2
 
 
 def test_unschedule_after_done_does_not_refund_discretionary_budget(client):
-    family = client.post("/v1/families", json={"name": "No Refund Family"}).json()
-    member = client.post(
-        f"/v1/families/{family['id']}/members",
-        json={"email": "norefund@example.com", "display_name": "No Refund", "role": "editor"},
-    ).json()
+    family, _, person = _seed_family_member_and_person(
+        client,
+        family_name="No Refund Family",
+        email="norefund@example.com",
+        display_name="No Refund",
+    )
 
     client.put(
         f"/v1/budgets/families/{family['id']}/policy",
@@ -184,7 +199,7 @@ def test_unschedule_after_done_does_not_refund_discretionary_budget(client):
             "threshold_1_to_5": 4.0,
             "period_days": 30,
             "default_allowance": 2,
-            "member_allowances": [{"member_id": member["id"], "allowance": 2}],
+            "person_allowances": [{"person_id": person["person_id"], "allowance": 2}],
         },
     )
 
@@ -192,7 +207,7 @@ def test_unschedule_after_done_does_not_refund_discretionary_budget(client):
         "/v1/decisions",
         json={
             "family_id": family["id"],
-            "created_by_member_id": member["id"],
+            "created_by_person_id": person["person_id"],
             "title": "Completed decision",
             "description": "Done should not refund",
         },
@@ -218,6 +233,6 @@ def test_unschedule_after_done_does_not_refund_discretionary_budget(client):
     assert deleted.status_code == 204
 
     final_summary = client.get(f"/v1/budgets/families/{family['id']}").json()
-    member_summary = next(item for item in final_summary["members"] if item["member_id"] == member["id"])
-    assert member_summary["used"] == 1
-    assert member_summary["remaining"] == 1
+    person_summary = next(item for item in final_summary["members"] if item["person_id"] == person["person_id"])
+    assert person_summary["used"] == 1
+    assert person_summary["remaining"] == 1

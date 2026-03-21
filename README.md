@@ -144,7 +144,7 @@ Shared Notes PARA layout:
 - `Notes/Inbox` is the landing zone for home-portal docs, whiteboards, and ready-tag staging.
 - `Notes/Projects`, `Notes/Areas`, `Notes/Resources`, `Notes/Archive`, and `Notes/Unfiled` are the canonical folders.
 - Run `scripts/nextcloud_para_agent.py migrate-familycloud --summary-json` once to flatten any legacy `Notes/FamilyCloud/...` content.
-- Run `scripts/nextcloud_para_agent.py process-ready --summary-json` to file `ready`-tagged inbox files.
+- Run `scripts/nextcloud_para_agent.py process-ready --summary-json` to file `ready`-tagged inbox files. Readable notes are now semantically titled and rewritten through the live OpenClaw `FileAgent` runtime; the script is just a thin entrypoint into the shared processor.
 
 See the full setup and security notes in `docs/runbooks/nextcloud-mcp-setup.md`.
 
@@ -236,6 +236,7 @@ Once DNS + cert trust is set up:
 - Vikunja MCP HTTP (internal service endpoint): `http://vikunja-mcp-http:8000/mcp`
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
+- Family events: `https://events.${FAMILY_DOMAIN}`
 
 The home portal is the main family-facing entrypoint. It gives you a single launcher for quick notes, whiteboarding, tasks, goals, files, and future family tools.
 
@@ -263,11 +264,12 @@ Example (Windows): edit `C:\Windows\System32\drivers\etc\hosts` as Admin:
 192.168.1.27 nextcloud.family.callender
 192.168.1.27 tasks.family.callender
 192.168.1.27 decision.family.callender
+192.168.1.27 events.family.callender
 ```
 
 Example (Linux/macOS): edit `/etc/hosts`:
 ```
-192.168.1.27 traefik.family.callender home.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender
+192.168.1.27 traefik.family.callender home.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender events.family.callender
 ```
 
 #### B2) Use CoreDNS manually on one machine
@@ -283,6 +285,8 @@ Example (Linux/macOS): edit `/etc/hosts`:
 - `certs/wildcard.${FAMILY_DOMAIN}.key`
 
 To avoid browser warnings, import/trust the `.crt` on your devices.
+
+If the browser shows `TRAEFIK DEFAULT CERT`, Traefik is not loading the generated wildcard cert yet. Fix the Traefik certificate configuration first; trusting `wildcard.${FAMILY_DOMAIN}.crt` on the client will not help until Traefik is actually serving that certificate.
 
 If you use WireGuard for remote access, import that same certificate on remote devices too; the VPN fixes routing and DNS, but it does not make a self-signed certificate publicly trusted.
 
@@ -305,6 +309,7 @@ If DNS doesn’t resolve:
 - confirm `Corefile` contains your hostnames
 
 If browser shows TLS warnings:
+- if the certificate subject/issuer says `TRAEFIK DEFAULT CERT`, Traefik is serving its fallback cert instead of `wildcard.${FAMILY_DOMAIN}.crt`
 - trust the generated wildcard cert on that device
 
 ---

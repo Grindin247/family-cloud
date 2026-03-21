@@ -228,16 +228,48 @@ def _to_plan(op: Operation) -> _OperationPlan:
             path="/goals",
             body={
                 "family_id": payload["family_id"],
+                "scope_type": payload.get("scope_type", "family"),
+                "owner_person_id": payload.get("owner_person_id"),
+                "visibility_scope": payload.get("visibility_scope"),
                 "name": payload["name"],
                 "description": payload["description"],
                 "weight": payload["weight"],
                 "action_types": payload.get("action_types", []),
-                "active": payload.get("active", True),
+                "status": payload.get("status", "active"),
+                "priority": payload.get("priority"),
+                "horizon": payload.get("horizon"),
+                "target_date": payload.get("target_date"),
+                "success_criteria": payload.get("success_criteria"),
+                "review_cadence_days": payload.get("review_cadence_days"),
+                "next_review_at": payload.get("next_review_at"),
+                "tags": payload.get("tags", []),
+                "external_refs": payload.get("external_refs", []),
             },
         )
     if op_type == "update_goal":
         _required(payload, ["goal_id"], op_type)
-        patch = {key: payload[key] for key in ["name", "description", "weight", "action_types", "active"] if key in payload}
+        patch = {
+            key: payload[key]
+            for key in [
+                "scope_type",
+                "owner_person_id",
+                "visibility_scope",
+                "name",
+                "description",
+                "weight",
+                "action_types",
+                "status",
+                "priority",
+                "horizon",
+                "target_date",
+                "success_criteria",
+                "review_cadence_days",
+                "next_review_at",
+                "tags",
+                "external_refs",
+            ]
+            if key in payload
+        }
         if not patch:
             raise ValueError("update_goal requires at least one mutable field")
         return _OperationPlan(summary=f"Update goal #{payload['goal_id']}", method="PATCH", path=f"/goals/{payload['goal_id']}", body=patch)
@@ -245,7 +277,7 @@ def _to_plan(op: Operation) -> _OperationPlan:
         _required(payload, ["goal_id"], op_type)
         return _OperationPlan(summary=f"Delete goal #{payload['goal_id']}", method="DELETE", path=f"/goals/{payload['goal_id']}", destructive=True)
     if op_type == "create_decision":
-        _required(payload, ["family_id", "created_by_member_id", "title", "description"], op_type)
+        _required(payload, ["family_id", "title", "description"], op_type)
         return _OperationPlan(summary=f"Create decision '{payload['title']}'", method="POST", path="/decisions", body=payload)
     if op_type == "update_decision":
         _required(payload, ["decision_id"], op_type)
@@ -304,7 +336,7 @@ def _to_plan(op: Operation) -> _OperationPlan:
             "threshold_1_to_5": payload["threshold_1_to_5"],
             "period_days": payload["period_days"],
             "default_allowance": payload["default_allowance"],
-            "member_allowances": payload.get("member_allowances", []),
+            "person_allowances": payload.get("person_allowances", []),
         }
         return _OperationPlan(summary=f"Update budget policy for family #{family_id}", method="PUT", path=f"/budgets/families/{family_id}/policy", body=body)
     if op_type == "reset_budget_period":
@@ -409,26 +441,62 @@ def list_family_features(family_id: int, actor_id: str = "read-only") -> dict[st
 
 
 @mcp.tool()
-def list_goals(family_id: int, active_only: bool = False, actor_id: str = "read-only") -> dict[str, Any]:
-    """Read goals for a family."""
+def list_goals(
+    family_id: int,
+    actor_id: str = "read-only",
+    scope_type: str | None = None,
+    owner_person_id: str | None = None,
+    status: str | None = None,
+    include_deleted: bool = False,
+) -> dict[str, Any]:
+    """Read scoped goals for a family."""
+    query: dict[str, Any] = {"family_id": family_id, "include_deleted": str(include_deleted).lower()}
+    if scope_type is not None:
+        query["scope_type"] = scope_type
+    if owner_person_id is not None:
+        query["owner_person_id"] = owner_person_id
+    if status is not None:
+        query["status"] = status
     return _request(
         "GET",
         "/goals",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
-        query={"family_id": family_id, "active_only": str(active_only).lower()},
+        query=query,
     )["body"]
 
 
 @mcp.tool()
-def list_decisions(family_id: int, include_scores: bool = True, actor_id: str = "read-only") -> dict[str, Any]:
-    """Read decisions for a family."""
+def list_decisions(
+    family_id: int,
+    include_scores: bool = True,
+    actor_id: str = "read-only",
+    scope_type: str | None = None,
+    owner_person_id: str | None = None,
+    target_person_id: str | None = None,
+    goal_policy: str | None = None,
+    include_deleted: bool = False,
+) -> dict[str, Any]:
+    """Read scoped decisions for a family."""
+    query: dict[str, Any] = {
+        "family_id": family_id,
+        "include_scores": str(include_scores).lower(),
+        "include_deleted": str(include_deleted).lower(),
+    }
+    if scope_type is not None:
+        query["scope_type"] = scope_type
+    if owner_person_id is not None:
+        query["owner_person_id"] = owner_person_id
+    if target_person_id is not None:
+        query["target_person_id"] = target_person_id
+    if goal_policy is not None:
+        query["goal_policy"] = goal_policy
     return _request(
         "GET",
         "/decisions",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
-        query={"family_id": family_id, "include_scores": str(include_scores).lower()},
+        query=query,
     )["body"]
 
 
@@ -448,6 +516,18 @@ def get_budget_summary(family_id: int, actor_id: str = "read-only") -> dict[str,
 def get_decision(decision_id: int, actor_id: str = "read-only") -> dict[str, Any]:
     """Read a single decision."""
     return _request("GET", f"/decisions/{decision_id}", actor_id=actor_id, actor_name=SERVER_NAME)["body"]
+
+
+@mcp.tool()
+def get_decision_goal_context(decision_id: int, actor_id: str = "read-only") -> dict[str, Any]:
+    """Read the active goal context used to score a decision."""
+    return _request("GET", f"/decisions/{decision_id}/goal-context", actor_id=actor_id, actor_name=SERVER_NAME)["body"]
+
+
+@mcp.tool()
+def get_decision_score_runs(decision_id: int, actor_id: str = "read-only") -> dict[str, Any]:
+    """Read score history for a decision."""
+    return _request("GET", f"/decisions/{decision_id}/score-runs", actor_id=actor_id, actor_name=SERVER_NAME)["body"]
 
 
 @mcp.tool()
@@ -480,7 +560,7 @@ def write_family_memory(
     actor_id: str,
     memory_type: str,
     text: str,
-    source_refs: list[str] | None = None,
+    source_refs: list[dict[str, Any]] | None = None,
     owner_person_id: str | None = None,
     visibility_scope: str = "family",
 ) -> dict[str, Any]:

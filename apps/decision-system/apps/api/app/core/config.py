@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     note_embedding_timeout_seconds: float = 20.0
     family_event_api_base_url: str = "http://family-event-api:8000/v1"
     family_event_internal_admin_token: str = "change-me"
+    decision_self_api_base_url: str = "http://decision-api:8000/v1"
     task_vikunja_url: str = "http://vikunja:3456"
     task_vikunja_api_prefix: str = "/api/v1"
     task_vikunja_token: str = ""
@@ -36,6 +37,9 @@ class Settings(BaseSettings):
     task_vikunja_webhook_secret: str = ""
     task_vikunja_webhook_target_url: str = ""
     task_vikunja_reconcile_lookback_minutes: int = 30
+    nextcloud_mcp_url: str = "http://nextcloud-mcp:8000/mcp"
+    file_agent_new_doc_idle_minutes: int = 10
+    file_agent_autofile_confidence_threshold: float = 0.70
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

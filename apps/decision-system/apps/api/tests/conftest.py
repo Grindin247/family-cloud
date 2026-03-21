@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -5,6 +8,10 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+ROOT = next((parent for parent in Path(__file__).resolve().parents if (parent / "agents").exists()), None)
+if ROOT is not None and str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.core.db import get_db
 from app.main import app
@@ -45,8 +52,11 @@ app.dependency_overrides[get_db] = override_get_db
 def reset_db(monkeypatch):
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    monkeypatch.setattr("app.routers.decisions.publish_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.routers.decisions.publish_family_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.routers.decisions._emit_decision_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.routers.goals._emit_goal_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.routers.roadmap.publish_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.services.family_dna.publish_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.services.ops._post_canonical_event", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.routers.files.emit_canonical_event", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.routers.notes.emit_canonical_event", lambda *args, **kwargs: None)
     yield

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,11 +10,11 @@ from app.models.entities import (
     BudgetPolicy,
     DiscretionaryBudgetLedger,
     Family,
-    FamilyMember,
     MemberBudgetSetting,
     Period,
     PeriodTypeEnum,
 )
+from app.models.identity import Person
 
 DEFAULT_THRESHOLD = 4.0
 DEFAULT_PERIOD_DAYS = 90
@@ -44,18 +45,18 @@ def get_or_create_policy(db: Session, family_id: int) -> BudgetPolicy:
     return policy
 
 
-def member_allowance_map(db: Session, family_id: int, default_allowance: int) -> dict[int, int]:
-    members = db.execute(select(FamilyMember).where(FamilyMember.family_id == family_id)).scalars().all()
+def person_allowance_map(db: Session, family_id: int, default_allowance: int) -> dict[str, int]:
+    persons = db.execute(select(Person).where(Person.family_id == family_id, Person.status == "active")).scalars().all()
     overrides = db.execute(select(MemberBudgetSetting).where(MemberBudgetSetting.family_id == family_id)).scalars().all()
-    override_map = {item.member_id: item.allowance for item in overrides}
-    return {member.id: override_map.get(member.id, default_allowance) for member in members}
+    override_map = {str(item.person_id): item.allowance for item in overrides}
+    return {str(person.person_id): override_map.get(str(person.person_id), default_allowance) for person in persons}
 
 
-def _allocate_period_ledger(db: Session, family_id: int, period_id: int, allowances: dict[int, int]) -> None:
-    for member_id, allowance in allowances.items():
+def _allocate_period_ledger(db: Session, family_id: int, period_id: int, allowances: dict[str, int]) -> None:
+    for person_id, allowance in allowances.items():
         db.add(
             DiscretionaryBudgetLedger(
-                member_id=member_id,
+                person_id=UUID(person_id),
                 period_id=period_id,
                 delta=allowance,
                 reason="period_allocation",
@@ -75,7 +76,6 @@ def ensure_active_period(db: Session, family_id: int, today: date | None = None)
         )
     ).scalars().all()
     if active_periods:
-        # Repair historical overlaps by keeping the most recent active period.
         active_periods.sort(key=lambda item: (item.start_date, item.id), reverse=True)
         chosen = active_periods[0]
         for stale in active_periods[1:]:
@@ -92,16 +92,16 @@ def ensure_active_period(db: Session, family_id: int, today: date | None = None)
     db.add(period)
     db.flush()
 
-    allowances = member_allowance_map(db, family_id, policy.default_allowance)
+    allowances = person_allowance_map(db, family_id, policy.default_allowance)
     _allocate_period_ledger(db, family_id, period.id, allowances)
     db.flush()
     return period
 
 
-def ensure_member_allocation_in_period(db: Session, family_id: int, period: Period, member_id: int) -> None:
+def ensure_person_allocation_in_period(db: Session, family_id: int, period: Period, person_id: str) -> None:
     existing = db.execute(
         select(DiscretionaryBudgetLedger).where(
-            DiscretionaryBudgetLedger.member_id == member_id,
+            DiscretionaryBudgetLedger.person_id == UUID(person_id),
             DiscretionaryBudgetLedger.period_id == period.id,
             DiscretionaryBudgetLedger.reason == "period_allocation",
         )
@@ -110,10 +110,10 @@ def ensure_member_allocation_in_period(db: Session, family_id: int, period: Peri
         return
 
     policy = get_or_create_policy(db, family_id)
-    allowance = member_allowance_map(db, family_id, policy.default_allowance).get(member_id, policy.default_allowance)
+    allowance = person_allowance_map(db, family_id, policy.default_allowance).get(person_id, policy.default_allowance)
     db.add(
         DiscretionaryBudgetLedger(
-            member_id=member_id,
+            person_id=UUID(person_id),
             period_id=period.id,
             delta=allowance,
             reason="period_allocation",
@@ -122,11 +122,11 @@ def ensure_member_allocation_in_period(db: Session, family_id: int, period: Peri
     )
 
 
-def member_remaining_in_period(db: Session, period_id: int, member_id: int) -> tuple[int, int, int]:
+def person_remaining_in_period(db: Session, period_id: int, person_id: str) -> tuple[int, int, int]:
     rows = db.execute(
         select(DiscretionaryBudgetLedger).where(
             DiscretionaryBudgetLedger.period_id == period_id,
-            DiscretionaryBudgetLedger.member_id == member_id,
+            DiscretionaryBudgetLedger.person_id == UUID(person_id),
         )
     ).scalars().all()
 

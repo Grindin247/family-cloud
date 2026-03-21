@@ -8,6 +8,7 @@ import json
 import os
 import posixpath
 import re
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,16 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agents.common.file_inbox import (
+    derive_filing_decision as shared_derive_filing_decision,
+    infer_file_item_type as shared_infer_file_item_type,
+    process_inbox_async as shared_process_inbox_async,
+)
 
 
 CANONICAL_FOLDERS = ("Inbox", "Projects", "Areas", "Resources", "Archive", "Unfiled")
@@ -41,6 +52,9 @@ TEXT_EXTENSIONS = {
     ".htm",
 }
 NOTE_EXTENSIONS = {".md", ".markdown", ".txt"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 PROJECT_KEYWORDS = {
     "project",
     "proposal",
@@ -179,43 +193,16 @@ def derive_filing_decision(
     readable_text: str | None,
     timestamp: datetime,
 ) -> dict[str, Any]:
-    original_name = _base_name(path)
-    stem, extension = _split_name(original_name)
-    descriptive_name = _looks_descriptive(stem)
-    readable = bool(readable_text)
-    if not readable and not descriptive_name:
-        folder = "Unfiled"
-        title = "unfiled"
-    else:
-        folder = _classify_folder(stem, readable_text, content_type)
-        title = _extract_title(readable_text, stem if descriptive_name else "captured-file")
-    timestamp_prefix = timestamp.astimezone(UTC).strftime("%Y-%m-%d_%H%M%S")
-    slug = _slugify(title if readable or descriptive_name else "unfiled")
-    filename = f"{timestamp_prefix}_{slug}{extension}"
-    return {
-        "folder": folder,
-        "filename": filename,
-        "title": title,
-        "readable": readable,
-        "descriptive_name": descriptive_name,
-    }
+    return shared_derive_filing_decision(
+        path=path,
+        content_type=content_type,
+        readable_text=readable_text,
+        timestamp=timestamp,
+    )
 
 
 def infer_file_item_type(content_type: str | None, extension: str, readable_text: str | None) -> str:
-    lowered = (content_type or "").lower()
-    if readable_text:
-        if extension in NOTE_EXTENSIONS:
-            return "note"
-        return "document"
-    if lowered.startswith("image/"):
-        return "image"
-    if lowered.startswith("audio/"):
-        return "audio"
-    if lowered.startswith("video/"):
-        return "video"
-    if extension in {".zip", ".tar", ".gz", ".7z", ".rar"}:
-        return "archive"
-    return "other"
+    return shared_infer_file_item_type(content_type, extension, readable_text)
 
 
 def infer_file_role(folder: str) -> str:
@@ -717,94 +704,17 @@ def index_document(
 
 
 async def process_ready_files_async(args: argparse.Namespace) -> dict[str, Any]:
-    username, password = _resolve_credentials(args)
-    client = NextcloudAutomationClient(
-        base_url=args.base_url,
-        username=username,
-        password=password,
-        verify=args.verify_tls,
+    return await shared_process_inbox_async(
+        mcp_url=args.mcp_url,
+        ready_tag=args.ready_tag,
+        decision_api_base_url=args.decision_api_base_url,
+        actor=args.actor,
+        family_id=args.family_id,
+        nextcloud_base_url=args.base_url,
+        include_dashboard_docs=True,
+        dashboard_idle_minutes=int(os.environ.get("FILE_AGENT_NEW_DOC_IDLE_MINUTES", "10")),
+        confidence_threshold=float(os.environ.get("FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD", "0.70")),
     )
-    summary: dict[str, Any] = {
-        "processed": 0,
-        "indexed": 0,
-        "unfiled": 0,
-        "conflicts": [],
-        "results": [],
-    }
-    try:
-        for folder in CANONICAL_FOLDERS:
-            client.ensure_directory(f"/Notes/{folder}")
-        mcp_reader: McpNextcloudReader | None = None
-        try:
-            mcp_reader = await McpNextcloudReader(args.mcp_url).__aenter__()
-            ready_files = await mcp_reader.list_ready_files("/Notes/Inbox", args.ready_tag)
-        except Exception:
-            ready_files = client.list_ready_files("/Notes/Inbox", args.ready_tag)
-        try:
-            for item in ready_files:
-                raw_content_type = item.content_type
-                readable_text: str | None = None
-                ext = posixpath.splitext(item.name)[1].lower()
-                try:
-                    if mcp_reader is not None:
-                        raw_bytes, raw_content_type = await mcp_reader.read_raw_file(item.path)
-                    else:
-                        raw_bytes, raw_content_type = client.read_file(item.path)
-                    readable_text = _extract_text(raw_bytes, raw_content_type, ext)
-                except Exception:
-                    try:
-                        raw_bytes, raw_content_type = client.read_file(item.path)
-                        readable_text = _extract_text(raw_bytes, raw_content_type, ext)
-                    except Exception:
-                        readable_text = None
-                decision = derive_filing_decision(
-                    path=item.path,
-                    content_type=raw_content_type,
-                    readable_text=readable_text,
-                    timestamp=_file_timestamp(item.last_modified),
-                )
-                destination = client.unique_destination(f"/Notes/{decision['folder']}/{decision['filename']}")
-                try:
-                    client.move(item.path, destination)
-                except FileExistsError:
-                    summary["conflicts"].append({"source": item.path, "destination": destination})
-                    continue
-                try:
-                    client.remove_tag(item.file_id or "", args.ready_tag)
-                except Exception:
-                    pass
-                indexed = index_document(
-                    decision_api_base_url=args.decision_api_base_url,
-                    actor=args.actor,
-                    family_id=args.family_id,
-                    item=item,
-                    destination_path=destination,
-                    folder=decision["folder"],
-                    readable_text=readable_text,
-                    content_type=raw_content_type,
-                    title=str(decision["title"]),
-                )
-                result = ProcessingResult(
-                    source_path=item.path,
-                    destination_path=destination,
-                    folder=str(decision["folder"]),
-                    indexed=indexed,
-                    unreadable=not bool(readable_text),
-                    reason="unreadable-without-context" if decision["folder"] == "Unfiled" else "filed",
-                )
-                summary["processed"] += 1
-                summary["indexed"] += int(indexed)
-                summary["unfiled"] += int(decision["folder"] == "Unfiled")
-                summary["results"].append(asdict(result))
-        finally:
-            if mcp_reader is not None:
-                try:
-                    await mcp_reader.__aexit__(None, None, None)
-                except Exception:
-                    pass
-        return summary
-    finally:
-        client.close()
 
 
 def _collect_migration_moves(client: NextcloudAutomationClient, source_root: str) -> tuple[list[tuple[str, str]], list[str], list[str]]:
@@ -880,7 +790,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     process_parser.add_argument(
         "--decision-api-base-url",
-        default=os.environ.get("DECISION_API_BASE_URL", "http://127.0.0.1:8010/v1"),
+        default=os.environ.get("DECISION_API_BASE_URL")
+        or (f"https://decision.{_load_repo_env().get('FAMILY_DOMAIN', '').strip()}/api/v1" if _load_repo_env().get("FAMILY_DOMAIN") else "http://127.0.0.1:8010/v1"),
     )
     process_parser.add_argument("--summary-json", action="store_true")
 

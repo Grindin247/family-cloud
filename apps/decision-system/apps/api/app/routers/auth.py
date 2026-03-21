@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import AuthContext, get_auth_context, require_auth
 from app.core.db import get_db
 from app.models.entities import Family, FamilyMember
+from app.services.identity import ensure_person_for_member
 
 router = APIRouter(prefix="/v1", tags=["auth"])
 
@@ -39,6 +40,7 @@ def get_me(
                 "family_id": family.id,
                 "family_name": family.name,
                 "member_id": member.id,
+                "person_id": str(ensure_person_for_member(db, member).person_id),
                 "role": member.role.value,
             }
             for member, family in memberships
@@ -50,4 +52,3 @@ def get_me(
 def logout(_: AuthContext = Depends(require_auth)):
     # With forward-auth, logout is handled by the IdP/proxy; the app doesn't hold a session.
     return {"ok": True}
-

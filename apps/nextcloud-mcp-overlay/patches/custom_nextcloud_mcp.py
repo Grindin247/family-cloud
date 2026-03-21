@@ -5,11 +5,14 @@ import base64
 import logging
 import os
 import posixpath
+from urllib.parse import quote, unquote
+import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import httpx
 import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -23,6 +26,7 @@ from nextcloud_mcp_server.observability.metrics import instrument_tool
 
 logger = logging.getLogger("family_cloud.nextcloud_mcp_overlay")
 _ORIGINAL_CONFIGURE_WEBDAV_TOOLS = upstream_app.configure_webdav_tools
+WEBDAV_NS = {"d": "DAV:", "oc": "http://owncloud.org/ns"}
 
 
 def _normalize_path(path: str) -> str:
@@ -75,6 +79,8 @@ def _format_file_entry(item: dict[str, Any]) -> dict[str, Any]:
         "etag": item.get("etag"),
         "file_id": item.get("file_id") or item.get("id"),
         "is_directory": bool(item.get("is_directory", False)),
+        "lock_owner": item.get("lock_owner") or "",
+        "lock_owner_display_name": item.get("lock_owner_display_name") or "",
     }
 
 
@@ -91,6 +97,170 @@ async def _list_directory_entries(client: Any, path: str) -> list[dict[str, Any]
     if isinstance(result, list):
         return [item for item in result if isinstance(item, dict)]
     return []
+
+
+def _nextcloud_env() -> tuple[str, str, str]:
+    host = os.getenv("NEXTCLOUD_HOST", "").rstrip("/")
+    username = os.getenv("NEXTCLOUD_USERNAME", "")
+    password = os.getenv("NEXTCLOUD_PASSWORD", "")
+    if not host or not username or not password:
+        raise RuntimeError("NEXTCLOUD_HOST, NEXTCLOUD_USERNAME, and NEXTCLOUD_PASSWORD are required")
+    return host, username, password
+
+
+def _webdav_url(host: str, username: str, path: str) -> str:
+    normalized = _normalize_path(path)
+    segments = [quote(part, safe="") for part in normalized.strip("/").split("/") if part]
+    suffix = "/".join(segments)
+    return f"{host}/remote.php/dav/files/{quote(username, safe='')}/{suffix}"
+
+
+def _decode_href(username: str, href: str) -> str | None:
+    marker = f"/remote.php/dav/files/{quote(username, safe='')}"
+    index = href.find(marker)
+    if index == -1:
+        return None
+    suffix = href[index + len(marker) :]
+    decoded = [unquote(part) for part in suffix.split("/")]
+    return "/" + "/".join(part for part in decoded if part) if decoded else "/"
+
+
+def _list_directory_entries_with_locks(path: str) -> list[dict[str, Any]]:
+    host, username, password = _nextcloud_env()
+    response = httpx.request(
+        "PROPFIND",
+        _webdav_url(host, username, path),
+        auth=(username, password),
+        headers={"Depth": "1", "Content-Type": "application/xml", "OCS-APIRequest": "true"},
+        content=(
+            '<?xml version="1.0"?>'
+            '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+            "<d:prop>"
+            "<d:getcontentlength/>"
+            "<d:getlastmodified/>"
+            "<d:getetag/>"
+            "<d:resourcetype/>"
+            "<d:getcontenttype/>"
+            "<oc:fileid/>"
+            "<oc:lock-owner/>"
+            "<oc:lock-owner-displayname/>"
+            "</d:prop>"
+            "</d:propfind>"
+        ),
+        timeout=30.0,
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    normalized_path = _normalize_path(path)
+    entries: list[dict[str, Any]] = []
+    for index, node in enumerate(root.findall("d:response", WEBDAV_NS)):
+        href = node.findtext("d:href", default="", namespaces=WEBDAV_NS)
+        item_path = _decode_href(username, href or "")
+        if not item_path or index == 0 or _normalize_path(item_path) == normalized_path:
+            continue
+        is_directory = node.find(".//d:collection", WEBDAV_NS) is not None
+        raw_size = node.findtext(".//d:getcontentlength", default="", namespaces=WEBDAV_NS)
+        size = int(raw_size) if raw_size.isdigit() else 0
+        entries.append(
+            {
+                "name": posixpath.basename(_normalize_path(item_path).rstrip("/")) or "/",
+                "path": _normalize_path(item_path),
+                "is_directory": is_directory,
+                "size": size,
+                "content_type": node.findtext(".//d:getcontenttype", default="", namespaces=WEBDAV_NS),
+                "last_modified": node.findtext(".//d:getlastmodified", default="", namespaces=WEBDAV_NS),
+                "etag": node.findtext(".//d:getetag", default="", namespaces=WEBDAV_NS),
+                "file_id": node.findtext(".//oc:fileid", default="", namespaces=WEBDAV_NS),
+                "lock_owner": node.findtext(".//oc:lock-owner", default="", namespaces=WEBDAV_NS),
+                "lock_owner_display_name": node.findtext(".//oc:lock-owner-displayname", default="", namespaces=WEBDAV_NS),
+            }
+        )
+    return entries
+
+
+def _get_tag_id(tag_name: str) -> int:
+    host, username, password = _nextcloud_env()
+    response = httpx.request(
+        "PROPFIND",
+        f"{host}/remote.php/dav/systemtags/",
+        auth=(username, password),
+        headers={"Depth": "1", "Content-Type": "application/xml", "OCS-APIRequest": "true"},
+        content=(
+            '<?xml version="1.0"?>'
+            '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+            "<d:prop><oc:id/><oc:display-name/><d:displayname/></d:prop>"
+            "</d:propfind>"
+        ),
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    for node in root.findall("d:response", WEBDAV_NS):
+        display = node.findtext(".//oc:display-name", default="", namespaces=WEBDAV_NS)
+        if not display:
+            display = node.findtext(".//d:displayname", default="", namespaces=WEBDAV_NS)
+        if display != tag_name:
+            continue
+        raw_id = node.findtext(".//oc:id", default="", namespaces=WEBDAV_NS)
+        if raw_id:
+            return int(raw_id)
+    raise RuntimeError(f"tag not found: {tag_name}")
+
+
+def _list_file_tags(file_id: str) -> list[str]:
+    if not file_id:
+        return []
+    host, username, password = _nextcloud_env()
+    response = httpx.request(
+        "PROPFIND",
+        f"{host}/remote.php/dav/systemtags-relations/files/{quote(file_id, safe='')}",
+        auth=(username, password),
+        headers={"Depth": "1", "Content-Type": "application/xml", "OCS-APIRequest": "true"},
+        content=(
+            '<?xml version="1.0"?>'
+            '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+            "<d:prop><oc:display-name/><d:displayname/></d:prop>"
+            "</d:propfind>"
+        ),
+        timeout=30.0,
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    tags: list[str] = []
+    for node in root.findall("d:response", WEBDAV_NS):
+        display = node.findtext(".//oc:display-name", default="", namespaces=WEBDAV_NS)
+        if not display:
+            display = node.findtext(".//d:displayname", default="", namespaces=WEBDAV_NS)
+        if display:
+            tags.append(display)
+    return tags
+
+
+def _list_tagged_entries_fallback(scope: str, tag_name: str) -> list[dict[str, Any]]:
+    normalized_scope = _normalize_path(scope)
+    queue: deque[str] = deque([normalized_scope])
+    visited: set[str] = set()
+    results: list[dict[str, Any]] = []
+    while queue:
+        current = queue.popleft()
+        if current in visited:
+            continue
+        visited.add(current)
+        for item in _list_directory_entries_with_locks(current):
+            item_path = _normalize_path(str(item.get("path") or ""))
+            if not item_path or not _is_in_scope(item_path, normalized_scope):
+                continue
+            if bool(item.get("is_directory", False)):
+                queue.append(item_path)
+                continue
+            tags = _list_file_tags(str(item.get("file_id") or ""))
+            if tag_name in tags:
+                results.append(item)
+    return results
 
 
 def _matches_content_type(item: dict[str, Any], content_type_prefixes: list[str]) -> bool:
@@ -137,32 +307,34 @@ def _register_ready_files_tool(mcp: FastMCP) -> None:
         client = await get_client(ctx)
         normalized_scope = _normalize_path(scope or "/")
         logger.info("ready_tag_lookup tag_name=%s scope=%s", tag_name, normalized_scope)
-        tag = await client.webdav.get_tag_by_name(tag_name)
-        if not tag or tag.get("id") is None:
-            logger.info("ready_tag_not_found tag_name=%s scope=%s", tag_name, normalized_scope)
-            return {
-                "success": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "scope": normalized_scope,
-                "tag_name": tag_name,
-                "results": [],
-                "total_found": 0,
-            }
-
-        files = await client.webdav.get_files_by_tag(int(tag["id"]))
-        scoped_results = [
-            _format_ready_file(item)
-            for item in files
-            if not bool(item.get("is_directory", False)) and _is_in_scope(str(item.get("path") or ""), normalized_scope)
-        ]
+        try:
+            tag = await client.webdav.get_tag_by_name(tag_name)
+            if not tag or tag.get("id") is None:
+                logger.info("ready_tag_not_found tag_name=%s scope=%s", tag_name, normalized_scope)
+                return {
+                    "success": True,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "scope": normalized_scope,
+                    "tag_name": tag_name,
+                    "results": [],
+                    "total_found": 0,
+                }
+            files = await client.webdav.get_files_by_tag(int(tag["id"]))
+            scoped_results = [
+                _format_ready_file(item)
+                for item in files
+                if not bool(item.get("is_directory", False)) and _is_in_scope(str(item.get("path") or ""), normalized_scope)
+            ]
+        except Exception as exc:
+            logger.warning("ready_tag_lookup_fallback tag_name=%s scope=%s error=%s", tag_name, normalized_scope, exc)
+            scoped_results = [_format_ready_file(item) for item in _list_tagged_entries_fallback(normalized_scope, tag_name)]
         scoped_results.sort(key=_sort_key, reverse=True)
         if limit is not None and limit >= 0:
             scoped_results = scoped_results[:limit]
         logger.info(
-            "ready_tag_results tag_name=%s scope=%s tag_id=%s total=%s",
+            "ready_tag_results tag_name=%s scope=%s total=%s",
             tag_name,
             normalized_scope,
-            tag["id"],
             len(scoped_results),
         )
         return {
@@ -204,6 +376,35 @@ def _register_stat_tool(mcp: FastMCP) -> None:
         return {"success": False, "path": normalized_path, "entry": None, "error": "path_not_found"}
 
     logger.info("registered_custom_tool name=nc_webdav_stat_path")
+
+
+def _register_detailed_directory_tool(mcp: FastMCP) -> None:
+    @mcp.tool(
+        title="List Directory With Lock Info",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=True,
+        ),
+    )
+    @require_scopes("files:read")
+    @instrument_tool
+    async def nc_webdav_list_directory_detailed(ctx: Context, path: str = "") -> dict[str, Any]:
+        """List a directory with lock metadata for safe inbox processing."""
+        del ctx
+        normalized_path = _normalize_path(path or "/")
+        files = _list_directory_entries_with_locks(normalized_path)
+        return {
+            "success": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "path": normalized_path,
+            "files": files,
+            "total_count": len(files),
+            "directories_count": sum(1 for item in files if item.get("is_directory")),
+            "files_count": sum(1 for item in files if not item.get("is_directory")),
+            "total_size": sum(int(item.get("size") or 0) for item in files if not item.get("is_directory")),
+        }
+
+    logger.info("registered_custom_tool name=nc_webdav_list_directory_detailed")
 
 
 def _register_recursive_listing_tool(mcp: FastMCP) -> None:
@@ -289,15 +490,19 @@ def _register_tag_listing_tool(mcp: FastMCP) -> None:
         """List files carrying a Nextcloud collaborative/system tag."""
         client = await get_client(ctx)
         normalized_scope = _normalize_path(scope or "/")
-        tag = await client.webdav.get_tag_by_name(tag_name)
-        if not tag or tag.get("id") is None:
-            return {"success": True, "scope": normalized_scope, "tag_name": tag_name, "results": [], "total_found": 0}
-        files = await client.webdav.get_files_by_tag(int(tag["id"]))
-        results = [
-            _format_file_entry(item)
-            for item in files
-            if _is_in_scope(str(item.get("path") or ""), normalized_scope)
-        ]
+        try:
+            tag = await client.webdav.get_tag_by_name(tag_name)
+            if not tag or tag.get("id") is None:
+                return {"success": True, "scope": normalized_scope, "tag_name": tag_name, "results": [], "total_found": 0}
+            files = await client.webdav.get_files_by_tag(int(tag["id"]))
+            results = [
+                _format_file_entry(item)
+                for item in files
+                if _is_in_scope(str(item.get("path") or ""), normalized_scope)
+            ]
+        except Exception as exc:
+            logger.warning("tag_listing_fallback tag_name=%s scope=%s error=%s", tag_name, normalized_scope, exc)
+            results = [_format_file_entry(item) for item in _list_tagged_entries_fallback(normalized_scope, tag_name)]
         results.sort(key=_sort_key, reverse=True)
         if limit is not None and limit >= 0:
             results = results[:limit]
@@ -365,14 +570,52 @@ def _register_safe_delete_tool(mcp: FastMCP) -> None:
     logger.info("registered_custom_tool name=nc_webdav_safe_delete")
 
 
+def _register_tag_mutation_tool(mcp: FastMCP) -> None:
+    @mcp.tool(
+        title="Remove File Tag",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            openWorldHint=True,
+        ),
+    )
+    @require_scopes("files:write")
+    @instrument_tool
+    async def nc_webdav_remove_tag_from_file(ctx: Context, file_id: str, tag_name: str) -> dict[str, Any]:
+        """Remove a collaborative/system tag from a file by file ID."""
+        del ctx
+        if not file_id:
+            return {"success": True, "file_id": file_id, "tag_name": tag_name, "status_code": 204}
+        host, username, password = _nextcloud_env()
+        tag_id = _get_tag_id(tag_name)
+        response = httpx.delete(
+            f"{host}/remote.php/dav/systemtags-relations/files/{quote(file_id, safe='')}/{tag_id}",
+            auth=(username, password),
+            headers={"OCS-APIRequest": "true"},
+            timeout=30.0,
+        )
+        if response.status_code not in {200, 204, 404}:
+            response.raise_for_status()
+        return {
+            "success": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "file_id": file_id,
+            "tag_name": tag_name,
+            "status_code": response.status_code,
+        }
+
+    logger.info("registered_custom_tool name=nc_webdav_remove_tag_from_file")
+
+
 def _configure_webdav_tools_with_ready(mcp: FastMCP) -> None:
     _ORIGINAL_CONFIGURE_WEBDAV_TOOLS(mcp)
     _register_ready_files_tool(mcp)
     _register_stat_tool(mcp)
+    _register_detailed_directory_tool(mcp)
     _register_recursive_listing_tool(mcp)
     _register_tag_listing_tool(mcp)
     _register_raw_read_tool(mcp)
     _register_safe_delete_tool(mcp)
+    _register_tag_mutation_tool(mcp)
 
 
 def _parse_args() -> argparse.Namespace:

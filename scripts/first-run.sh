@@ -141,6 +141,7 @@ cat > "$COREFILE" <<EOF
     $LAN_IP nextcloudsetup.$FAMILY_DOMAIN
     $LAN_IP tasks.$FAMILY_DOMAIN
     $LAN_IP decision.$FAMILY_DOMAIN
+    $LAN_IP events.$FAMILY_DOMAIN
     fallthrough
     }
 
@@ -304,6 +305,16 @@ http:
   serversTransports:
     insecure-transport:
       insecureSkipVerify: true
+
+tls:
+  certificates:
+    - certFile: "/certs/wildcard.$FAMILY_DOMAIN.crt"
+      keyFile: "/certs/wildcard.$FAMILY_DOMAIN.key"
+  stores:
+    default:
+      defaultCertificate:
+        certFile: "/certs/wildcard.$FAMILY_DOMAIN.crt"
+        keyFile: "/certs/wildcard.$FAMILY_DOMAIN.key"
 EOF
 
 say "Generating local wildcard TLS cert"

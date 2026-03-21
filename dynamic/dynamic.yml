@@ -78,6 +78,19 @@ http:
       service: decision
       tls: {}
 
+    events-http:
+      rule: "Host(`events.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: events
+
+    events:
+      rule: "Host(`events.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: events
+      tls: {}
+
     # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
     tasks-api-http:
       rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
@@ -147,6 +160,21 @@ http:
         servers:
           - url: "http://decision-nginx:80"
 
+    events:
+      loadBalancer:
+        servers:
+          - url: "http://family-event-nginx:80"
+
   serversTransports:
     insecure-transport:
       insecureSkipVerify: true
+
+tls:
+  certificates:
+    - certFile: "/certs/wildcard.family.callender.crt"
+      keyFile: "/certs/wildcard.family.callender.key"
+  stores:
+    default:
+      defaultCertificate:
+        certFile: "/certs/wildcard.family.callender.crt"
+        keyFile: "/certs/wildcard.family.callender.key"

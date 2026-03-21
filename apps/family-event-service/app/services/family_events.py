@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,12 @@ def _normalize_string_list(values: Iterable[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_token(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 def _record_to_event_dict(row: FamilyEventRecord) -> dict[str, Any]:
     return {
         "event_id": row.event_id,
@@ -79,6 +86,94 @@ def _record_to_event_dict(row: FamilyEventRecord) -> dict[str, Any]:
         "source": _json_loads(row.source_json, {}),
         "integrity": _json_loads(row.integrity_json, {}),
     }
+
+
+def _record_scope_tokens(row: FamilyEventRecord) -> set[str]:
+    payload = _json_loads(row.payload_json, {}) or {}
+    raw_tokens = {
+        row.actor_person_id,
+        row.subject_person_id,
+        row.actor_id,
+        row.subject_id,
+        payload.get("target_person_id"),
+    }
+    return {token for token in (_normalize_token(value) for value in raw_tokens) if token}
+
+
+def _record_search_blob(row: FamilyEventRecord) -> str:
+    payload = _json_loads(row.payload_json, {}) or {}
+    source = _json_loads(row.source_json, {}) or {}
+    tags = _json_loads(row.tags_json, []) or []
+    parts = [
+        row.event_id,
+        row.domain,
+        row.event_type,
+        row.actor_id,
+        row.actor_person_id,
+        row.actor_type,
+        row.subject_id,
+        row.subject_person_id,
+        row.subject_type,
+        row.correlation_id,
+        row.causation_id,
+        row.privacy_classification,
+        row.export_policy,
+        _json_dumps(tags),
+        _json_dumps(payload),
+        _json_dumps(source),
+    ]
+    return "\n".join(str(part) for part in parts if part is not None).lower()
+
+
+def _match_wildcard_query(pattern: str | None, haystack: str) -> bool:
+    if not pattern:
+        return True
+    compiled = "^" + re.escape(pattern).replace("\\*", ".*") + "$"
+    return re.search(compiled, haystack, flags=re.IGNORECASE | re.DOTALL) is not None
+
+
+def _normalize_query_pattern(query: str | None) -> str | None:
+    value = str(query or "").strip()
+    if not value:
+        return None
+    if "*" not in value:
+        return f"*{value}*"
+    return value
+
+
+def _filter_rows_for_search(
+    rows: list[FamilyEventRecord],
+    *,
+    member_scope_tokens: Iterable[str] | None = None,
+    query: str | None = None,
+    domain: str | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    subject_id: str | None = None,
+    actor_id: str | None = None,
+    exclude_field: str | None = None,
+) -> list[FamilyEventRecord]:
+    scope_tokens = {token for token in (_normalize_token(value) for value in (member_scope_tokens or [])) if token}
+    normalized_query = _normalize_query_pattern(query)
+    filtered = rows
+
+    if scope_tokens:
+        filtered = [row for row in filtered if _record_scope_tokens(row).intersection(scope_tokens)]
+    if normalized_query:
+        filtered = [row for row in filtered if _match_wildcard_query(normalized_query, _record_search_blob(row))]
+    if exclude_field != "domain" and domain:
+        filtered = [row for row in filtered if row.domain == domain]
+    if exclude_field != "event_type" and event_type:
+        filtered = [row for row in filtered if row.event_type == event_type]
+    if exclude_field != "subject_id" and subject_id:
+        filtered = [row for row in filtered if row.subject_id == subject_id]
+    if exclude_field != "actor_id" and actor_id:
+        filtered = [row for row in filtered if row.actor_id == actor_id]
+    if exclude_field != "tag" and tag:
+        needle = tag.strip().lower()
+        filtered = [row for row in filtered if needle in {str(item).strip().lower() for item in _json_loads(row.tags_json, [])}]
+
+    return filtered
 
 
 def _query_family_event_rows(
@@ -326,6 +421,111 @@ def list_family_events(
         end=end,
     )
     return [_record_to_event_dict(row) for row in rows[offset : offset + limit]]
+
+
+def search_family_events(
+    db: Session,
+    *,
+    family_id: int,
+    domain: str | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    subject_id: str | None = None,
+    actor_id: str | None = None,
+    member_scope_tokens: Iterable[str] | None = None,
+    query: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    rows = _query_family_event_rows(
+        db,
+        family_id=family_id,
+        domain=domain,
+        event_type=event_type,
+        tag=tag,
+        subject_id=subject_id,
+        actor_id=actor_id,
+        start=start,
+        end=end,
+    )
+    rows = _filter_rows_for_search(
+        rows,
+        member_scope_tokens=member_scope_tokens,
+        query=query,
+    )
+    total = len(rows)
+    items = [_record_to_event_dict(row) for row in rows[offset : offset + limit]]
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def list_event_filter_options(
+    db: Session,
+    *,
+    family_id: int,
+    member_scope_tokens: Iterable[str] | None = None,
+    query: str | None = None,
+    domain: str | None = None,
+    event_type: str | None = None,
+    tag: str | None = None,
+    subject_id: str | None = None,
+    actor_id: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, list[str]]:
+    rows = _query_family_event_rows(db, family_id=family_id, start=start, end=end)
+
+    def _collect(field_name: str) -> tuple[set[str], set[str], set[str], set[str], set[str]]:
+        scoped_rows = _filter_rows_for_search(
+            rows,
+            member_scope_tokens=member_scope_tokens,
+            query=query,
+            domain=domain,
+            event_type=event_type,
+            tag=tag,
+            subject_id=subject_id,
+            actor_id=actor_id,
+            exclude_field=field_name,
+        )
+        domains: set[str] = set()
+        event_types: set[str] = set()
+        tags: set[str] = set()
+        actor_ids: set[str] = set()
+        subject_ids: set[str] = set()
+        for row in scoped_rows:
+            if row.domain:
+                domains.add(str(row.domain))
+            if row.event_type:
+                event_types.add(str(row.event_type))
+            if row.actor_id:
+                actor_ids.add(str(row.actor_id))
+            if row.subject_id:
+                subject_ids.add(str(row.subject_id))
+            for row_tag in _json_loads(row.tags_json, []) or []:
+                value = str(row_tag or "").strip()
+                if value:
+                    tags.add(value)
+        return domains, event_types, tags, actor_ids, subject_ids
+
+    domains, _, _, _, _ = _collect("domain")
+    _, event_types, _, _, _ = _collect("event_type")
+    _, _, tags, _, _ = _collect("tag")
+    _, _, _, actor_ids, _ = _collect("actor_id")
+    _, _, _, _, subject_ids = _collect("subject_id")
+
+    return {
+        "domains": sorted(domains),
+        "event_types": sorted(event_types),
+        "tags": sorted(tags),
+        "actor_ids": sorted(actor_ids),
+        "subject_ids": sorted(subject_ids),
+    }
 
 
 def build_timeline(

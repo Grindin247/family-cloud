@@ -37,6 +37,7 @@ class MemorySearchHit(BaseModel):
     score: float
     text: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MemorySearchResponse(BaseModel):

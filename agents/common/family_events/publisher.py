@@ -38,7 +38,9 @@ class FamilyEventPublisher:
         self._js = None
 
     async def _ensure_stream(self, js) -> None:
-        subjects = ["family.>", "decision.>", "roadmap.>", "agent.>", "family.events.>"]
+        # `family.>` already matches `family.events.*`, so adding both causes
+        # an overlap error on some JetStream versions when updating the stream.
+        subjects = ["family.>", "decision.>", "roadmap.>", "agent.>"]
         cfg = StreamConfig(
             name=self._stream_name,
             subjects=subjects,
@@ -65,18 +67,14 @@ class FamilyEventPublisher:
         return str(event["event_id"])
 
     def publish_sync(self, event: dict[str, Any], *, subject: str | None = None) -> str:
-        return asyncio.run(self.publish(event, subject=subject))
+        async def _publish_once() -> str:
+            try:
+                return await self.publish(event, subject=subject)
+            finally:
+                await self.close()
 
-
-_publisher: FamilyEventPublisher | None = None
-
-
-def _instance() -> FamilyEventPublisher:
-    global _publisher
-    if _publisher is None:
-        _publisher = FamilyEventPublisher()
-    return _publisher
+        return asyncio.run(_publish_once())
 
 
 def publish_event(event: dict[str, Any], *, subject: str | None = None) -> str:
-    return _instance().publish_sync(event, subject=subject)
+    return FamilyEventPublisher().publish_sync(event, subject=subject)

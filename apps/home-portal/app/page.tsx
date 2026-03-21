@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { resolvePortal, PortalAccent, PortalGroup, PortalIcon } from "../lib/portal";
 
+const POST_TILE_IDS = new Set(["new-doc", "whiteboard", "process-inbox"]);
+
 function groupCopy(group: PortalGroup): string {
   if (group === "Start") return "Fresh starts for the next thing you need to capture.";
   if (group === "Plan") return "Shared workspaces for decisions, tasks, and momentum.";
@@ -52,6 +54,16 @@ function TileIcon({ icon }: { icon: PortalIcon }) {
           <path {...common} d="M16 7v3M25 16h-3M16 25v-3M7 16h3" />
         </svg>
       );
+    case "events":
+      return (
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path {...common} d="M8 23.5h16" />
+          <path {...common} d="M10 20V12" />
+          <path {...common} d="M16 20V8.5" />
+          <path {...common} d="M22 20v-5.5" />
+          <path {...common} d="M7 11.5c2.5 0 2.5-3.5 5-3.5s2.5 3.5 5 3.5 2.5-3.5 5-3.5 2.5 3.5 5 3.5" />
+        </svg>
+      );
     case "notes":
       return (
         <svg viewBox="0 0 32 32" aria-hidden="true">
@@ -88,12 +100,51 @@ function AccentSeeds({ accent }: { accent: PortalAccent }) {
 
 export default function HomePage() {
   const [hostname, setHostname] = useState("");
+  const [inboxBanner, setInboxBanner] = useState<{ status: string; summary: string; detail: string | null } | null>(null);
+  const [processingTileId, setProcessingTileId] = useState<string | null>(null);
 
   useEffect(() => {
     setHostname(window.location.hostname);
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("inboxStatus");
+    const summary = params.get("inboxSummary");
+    const detail = params.get("inboxDetail");
+    if (!status && !summary && !detail) {
+      setInboxBanner(null);
+      return;
+    }
+    setInboxBanner({
+      status: status || "completed",
+      summary: summary || "Inbox processing finished.",
+      detail,
+    });
   }, []);
 
   const portal = useMemo(() => resolvePortal(hostname), [hostname]);
+
+  function handleTileSubmit(tileId: string) {
+    return (event: React.FormEvent<HTMLFormElement>) => {
+      if (tileId === "process-inbox") {
+        if (processingTileId === tileId) {
+          event.preventDefault();
+          return;
+        }
+        const confirmed = window.confirm("Process the inbox now? This can rename and file items from /Notes/Inbox.");
+        if (!confirmed) {
+          event.preventDefault();
+          return;
+        }
+        setProcessingTileId(tileId);
+        setInboxBanner({
+          status: "processing",
+          summary: "Processing inbox now...",
+          detail: "Reading the inbox, checking locks, and filing any ready captures. This can take a minute.",
+        });
+        return;
+      }
+      setProcessingTileId(tileId);
+    };
+  }
 
   return (
     <main className="portal-shell">
@@ -114,6 +165,18 @@ export default function HomePage() {
         </div>
       </section>
 
+      {inboxBanner ? (
+        <section
+          aria-live="polite"
+          className={`portal-banner portal-banner-${
+            inboxBanner.status === "failed" ? "error" : inboxBanner.status === "partial" ? "warn" : inboxBanner.status === "processing" ? "info" : "success"
+          }`}
+        >
+          <div className="portal-banner-title">{inboxBanner.summary}</div>
+          {inboxBanner.detail ? <p className="portal-banner-detail">{inboxBanner.detail}</p> : null}
+        </section>
+      ) : null}
+
       <section className="group-list" aria-label="Family Cloud tools">
         {portal.groups.map((group) => (
           <section className="group-card" key={group.name} aria-labelledby={`group-${group.name}`}>
@@ -129,6 +192,7 @@ export default function HomePage() {
                 const style = {
                   ["--tile-index" as string]: String(tileIndex),
                 } as React.CSSProperties;
+                const isProcessing = processingTileId === tile.id;
 
                 const inner = (
                   <>
@@ -145,9 +209,9 @@ export default function HomePage() {
                       <p>{tile.subtitle}</p>
                     </div>
                     <div className="tile-footer">
-                      <span>{tile.launchMode === "disabled" ? "Coming soon" : "Open tool"}</span>
-                      <span className="tile-arrow" aria-hidden="true">
-                        {tile.launchMode === "disabled" ? "..." : "->"}
+                      <span>{isProcessing ? "Processing..." : tile.launchMode === "disabled" ? "Coming soon" : "Open tool"}</span>
+                      <span className={`tile-arrow${isProcessing ? " tile-arrow-processing" : ""}`} aria-hidden="true">
+                        {isProcessing ? "..." : tile.launchMode === "disabled" ? "..." : "->"}
                       </span>
                     </div>
                   </>
@@ -158,6 +222,23 @@ export default function HomePage() {
                     <article className="portal-tile is-disabled" key={tile.id} style={style} aria-disabled="true">
                       {inner}
                     </article>
+                  );
+                }
+
+                if (POST_TILE_IDS.has(tile.id)) {
+                  return (
+                    <form
+                      action={tile.resolvedHref}
+                      className="portal-tile-form"
+                      key={tile.id}
+                      method="post"
+                      onSubmit={handleTileSubmit(tile.id)}
+                      style={style}
+                    >
+                      <button className={`portal-tile portal-tile-button${isProcessing ? " portal-tile-processing" : ""}`} disabled={isProcessing} type="submit">
+                        {inner}
+                      </button>
+                    </form>
                   );
                 }
 

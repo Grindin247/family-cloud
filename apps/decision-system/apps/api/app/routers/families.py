@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.auth import AuthContext, get_auth_context
 from app.core.db import get_db
 from app.models.entities import Family, FamilyMember, RoleEnum
+from app.models.identity import Person
 from app.schemas.families import (
     FamilyCreate,
     FamilyListResponse,
@@ -17,7 +18,7 @@ from app.schemas.families import (
     FamilyUpdate,
 )
 from app.services.access import require_family, require_family_admin, require_family_member
-from app.services.identity import slugify_family_name
+from app.services.identity import ensure_person_for_member, slugify_family_name
 from app.services.purge import purge_family
 
 router = APIRouter(prefix="/v1/families", tags=["families"])
@@ -46,14 +47,15 @@ def create_family(
     db.flush()
     if ctx is not None:
         # Creator becomes the initial admin member.
-        db.add(
-            FamilyMember(
-                family_id=family.id,
-                email=ctx.email,
-                display_name=ctx.email,
-                role=RoleEnum.admin,
-            )
+        member = FamilyMember(
+            family_id=family.id,
+            email=ctx.email,
+            display_name=ctx.email,
+            role=RoleEnum.admin,
         )
+        db.add(member)
+        db.flush()
+        ensure_person_for_member(db, member)
     db.commit()
     db.refresh(family)
     return FamilyResponse.model_validate(family, from_attributes=True)
@@ -147,6 +149,8 @@ def create_family_member(
     )
     db.add(member)
     try:
+        db.flush()
+        ensure_person_for_member(db, member)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -205,6 +209,7 @@ def update_family_member(
     if payload.role is not None:
         member.role = RoleEnum(payload.role)
 
+    ensure_person_for_member(db, member)
     db.commit()
     db.refresh(member)
     return FamilyMemberResponse(
@@ -230,6 +235,10 @@ def delete_family_member(
     if member is None or member.family_id != family_id:
         raise HTTPException(status_code=404, detail="family member not found")
 
+    person = db.query(Person).filter(Person.legacy_member_id == member.id).one_or_none()
+    if person is not None:
+        person.legacy_member_id = None
+        person.status = "active"
     db.delete(member)
     try:
         db.commit()
