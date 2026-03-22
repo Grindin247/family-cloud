@@ -113,7 +113,7 @@ def test_feature_flag_can_disable_decision_domain(client, db_session):
     assert response.status_code == 404
 
 
-def test_feature_listing_includes_profile_domain(client, db_session):
+def test_feature_listing_includes_profile_and_planning_domains(client, db_session):
     family = Family(name="Callender Family", slug="callender-family")
     db_session.add(family)
     db_session.flush()
@@ -131,6 +131,7 @@ def test_feature_listing_includes_profile_domain(client, db_session):
     assert response.status_code == 200
     keys = {item["feature_key"] for item in response.json()["items"]}
     assert "profile" in keys
+    assert "planning" in keys
 
 
 def test_resolved_context_returns_person_contract(client, db_session):

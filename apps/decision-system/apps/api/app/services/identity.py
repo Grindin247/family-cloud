@@ -21,6 +21,7 @@ DEFAULT_FEATURES = {
     "files": True,
     "events": True,
     "profile": False,
+    "planning": False,
     "health": False,
     "education": False,
     "finance": False,

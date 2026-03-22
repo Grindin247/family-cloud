@@ -130,6 +130,19 @@ http:
       service: profiles
       tls: {}
 
+    planning-http:
+      rule: "Host(`planning.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: planning
+
+    planning:
+      rule: "Host(`planning.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: planning
+      tls: {}
+
     # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
     tasks-api-http:
       rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
@@ -218,6 +231,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://profile-nginx:80"
+
+    planning:
+      loadBalancer:
+        servers:
+          - url: "http://plan-nginx:80"
 
   serversTransports:
     insecure-transport:

@@ -53,6 +53,17 @@ function personName(context: ViewerContext | null, personId: string): string {
   return context?.persons.find((person) => person.person_id === personId)?.display_name || personId;
 }
 
+function formatLabel(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
+function statusTone(status: string | null | undefined): string {
+  if (status === "active") return "tone-leaf";
+  if (status === "pending" || status === "draft") return "tone-sun";
+  if (status === "inactive" || status === "archived") return "tone-berry";
+  return "tone-muted";
+}
+
 function safeJsonInput(value: string): Record<string, unknown> {
   const trimmed = value.trim();
   if (!trimmed) return {};
@@ -180,6 +191,78 @@ export default function Page() {
     return { adults, children, accessibilityProfiles, relationships };
   }, [draft, profiles]);
 
+  const peopleOptions = useMemo(
+    () =>
+      profiles.length
+        ? profiles
+        : context?.persons.map((person) => ({
+            person_id: person.person_id,
+            family_id: context.family_id,
+            display_name: person.display_name,
+            canonical_name: person.display_name,
+            role_in_family: person.role_in_family,
+            is_admin: person.is_admin,
+            status: person.status,
+            role_tags: [],
+            hobbies: [],
+            interests: [],
+            relationship_count: 0,
+            updated_at: null,
+          })) || [],
+    [context, profiles],
+  );
+
+  const selectedProfileSummary = useMemo(() => {
+    if (!draft) {
+      return {
+        accounts: 0,
+        consents: 0,
+        supports: 0,
+        communicationSignals: 0,
+        relationships: 0,
+      };
+    }
+
+    const accounts = Object.values(draft.accounts || {}).reduce((count, items) => count + items.length, 0);
+    const supports =
+      draft.preferences.accessibility_needs.accommodations.length +
+      draft.preferences.accessibility_needs.assistive_tools.length +
+      draft.preferences.learning_preferences.supports.length;
+    const communicationSignals =
+      draft.preferences.communication_preferences.preferred_channels.length +
+      draft.preferences.communication_preferences.boundaries.length;
+
+    return {
+      accounts,
+      consents: draft.account_profile.legal_consents.length,
+      supports,
+      communicationSignals,
+      relationships: draft.relationships.length,
+    };
+  }, [draft]);
+
+  const selectedSignals = useMemo(() => {
+    if (!draft) return [];
+    return Array.from(
+      new Set([
+        ...draft.person_profile.role_tags,
+        ...(draft.role_in_family ? [draft.role_in_family] : []),
+        ...draft.preferences.interests,
+        ...draft.preferences.hobbies,
+      ]),
+    ).slice(0, 6);
+  }, [draft]);
+
+  const relationshipDisabledReason = useMemo(() => {
+    if (!relationshipDraft.source_person_id || !relationshipDraft.target_person_id) {
+      return "Choose both people before saving a relationship.";
+    }
+    if (relationshipDraft.source_person_id === relationshipDraft.target_person_id) {
+      return "Relationships need two different people.";
+    }
+    return null;
+  }, [relationshipDraft.source_person_id, relationshipDraft.target_person_id]);
+
   useEffect(() => {
     async function load() {
       try {
@@ -261,6 +344,7 @@ export default function Page() {
     if (!familyId) return;
     try {
       setEnabling(true);
+      setError(null);
       await api.updateProfileFeature(familyId, true);
       await refreshWorkspace(familyId, context?.person_id);
     } catch (actionError) {
@@ -274,6 +358,7 @@ export default function Page() {
     if (!familyId || !draft) return;
     try {
       setSaving(true);
+      setError(null);
       const saved = await api.putProfile(familyId, draft.person_id, {
         account_profile: draft.account_profile,
         person_profile: draft.person_profile,
@@ -290,8 +375,13 @@ export default function Page() {
 
   async function saveRelationship() {
     if (!familyId) return;
+    if (relationshipDisabledReason) {
+      setError(relationshipDisabledReason);
+      return;
+    }
     try {
       setSavingRelationship(true);
+      setError(null);
       const payload = {
         source_person_id: relationshipDraft.source_person_id,
         target_person_id: relationshipDraft.target_person_id,
@@ -324,6 +414,7 @@ export default function Page() {
     if (!familyId) return;
     if (!window.confirm("Remove this relationship from the graph?")) return;
     try {
+      setError(null);
       await api.deleteRelationship(familyId, item.relationship_id);
       setRelationshipDraft({
         ...emptyProfile(),
@@ -353,6 +444,9 @@ export default function Page() {
   if (loading && !me) {
     return (
       <main className="profile-shell">
+        <div className="profile-orb profile-orb-left" aria-hidden="true" />
+        <div className="profile-orb profile-orb-right" aria-hidden="true" />
+        <div className="profile-orb profile-orb-bottom" aria-hidden="true" />
         <section className="profile-stack">
           <div className="panel empty-state">Loading profile workspace...</div>
         </section>
@@ -362,27 +456,44 @@ export default function Page() {
 
   return (
     <main className="profile-shell">
+      <div className="profile-orb profile-orb-left" aria-hidden="true" />
+      <div className="profile-orb profile-orb-right" aria-hidden="true" />
+      <div className="profile-orb profile-orb-bottom" aria-hidden="true" />
       <section className="profile-stack">
         <header className="panel hero-panel">
           <div className="eyebrow">Family Profile Studio</div>
           <div className="hero-row">
-            <div>
+            <div className="hero-copy">
               <h1>Account security, human preferences, and relationship context in one place.</h1>
               <p>
                 Profile management stays modular from decisions and education: this space keeps MFA posture, legal consents,
                 communication style, accessibility notes, dietary needs, and the living relationship graph together.
               </p>
-            </div>
-            <div className="hero-meta">
               <div className="status-row">
-                <span className={context?.profile_enabled ? "status-chip tone-leaf" : "status-chip tone-warn"}>
+                <span className={context?.profile_enabled ? "status-chip tone-leaf" : "status-chip tone-sun"}>
                   {context?.profile_enabled ? "Profile domain enabled" : "Profile domain disabled"}
                 </span>
                 {draft?.updated_at ? <span className="status-chip tone-muted">Last saved {formatDate(draft.updated_at)}</span> : null}
+                {draft?.status ? <span className={`status-chip ${statusTone(draft.status)}`}>{draft.status}</span> : null}
               </div>
-              <p className="helper">
-                {context?.primary_email ? `Signed in as ${context.primary_email}.` : "Sign in through the family identity layer to edit profiles."}
-              </p>
+            </div>
+            <div className="hero-meta">
+              <article className="meta-card">
+                <span>Signed in as</span>
+                <strong>{context?.primary_email || me?.email || "Family identity required"}</strong>
+                <p className="helper">
+                  {context?.family_slug
+                    ? `Family ${context.family_slug} · ${context.is_family_admin ? "Admin access" : "Member access"}`
+                    : "Sign in through the family identity layer to edit profiles."}
+                </p>
+              </article>
+              <article className="meta-card">
+                <span>Current focus</span>
+                <strong>{draft?.display_name || personName(context, selectedPersonId || context?.person_id || "")}</strong>
+                <p className="helper">
+                  {draft ? `${selectedProfileSummary.relationships} relationships · ${selectedProfileSummary.accounts} linked accounts` : "Choose a person to inspect profile details."}
+                </p>
+              </article>
             </div>
           </div>
           <div className="summary-grid">
@@ -440,29 +551,39 @@ export default function Page() {
                 </SelectField>
               </div>
 
+              <article className="focus-card">
+                <span>Selected person</span>
+                <strong>{draft?.display_name || personName(context, selectedPersonId || context?.person_id || "")}</strong>
+                <p className="helper">
+                  {draft
+                    ? `${draft.relationships.length} relationship edges, ${draft.account_profile.legal_consents.length} consent records, ${selectedSignals.length} quick signals`
+                    : "Pick a person to review their security posture, preferences, and support graph."}
+                </p>
+                <div className="pill-row">
+                  {selectedSignals.length ? (
+                    selectedSignals.map((chip) => (
+                      <span className="pill" key={`signal-${chip}`}>
+                        {chip}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="pill">No quick signals yet</span>
+                  )}
+                </div>
+              </article>
+
               <div className="person-list">
-                {(profiles.length ? profiles : context?.persons.map((person) => ({
-                  person_id: person.person_id,
-                  family_id: context.family_id,
-                  display_name: person.display_name,
-                  canonical_name: person.display_name,
-                  role_in_family: person.role_in_family,
-                  is_admin: person.is_admin,
-                  status: person.status,
-                  role_tags: [],
-                  hobbies: [],
-                  interests: [],
-                  relationship_count: 0,
-                  updated_at: null,
-                })) || []
-                ).map((profile) => (
+                {peopleOptions.map((profile) => (
                   <button
                     key={profile.person_id}
                     className={selectedPersonId === profile.person_id ? "person-card person-card-active" : "person-card"}
                     onClick={() => setSelectedPersonId(profile.person_id)}
                     type="button"
                   >
-                    <strong>{profile.display_name}</strong>
+                    <div className="person-card-head">
+                      <strong>{profile.display_name}</strong>
+                      <span className={`status-chip ${statusTone(profile.status)}`}>{profile.status}</span>
+                    </div>
                     <span>{profile.relationship_count} graph links</span>
                     <div className="pill-row">
                       {roleChips(profile).slice(0, 3).map((chip) => (
@@ -510,12 +631,41 @@ export default function Page() {
                       <p className="muted-copy">
                         Canonical identity is still owned by the shared family registry. This workspace layers richer person context on top.
                       </p>
+                      <div className="status-row">
+                        <span className={`status-chip ${draft.is_admin ? "tone-sun" : "tone-muted"}`}>{draft.is_admin ? "Family admin" : "Member record"}</span>
+                        {draft.role_in_family ? <span className="status-chip tone-sky">{draft.role_in_family}</span> : null}
+                        {draft.person_profile.timezone ? <span className="status-chip tone-muted">{draft.person_profile.timezone}</span> : null}
+                        {draft.person_profile.locale ? <span className="status-chip tone-muted">{draft.person_profile.locale}</span> : null}
+                      </div>
                     </div>
                     <div className="button-row">
                       <button className="button" disabled={saving} onClick={saveProfile} type="button">
                         {saving ? "Saving..." : "Save profile"}
                       </button>
                     </div>
+                  </div>
+
+                  <div className="detail-grid">
+                    <article className="detail-card">
+                      <span>Linked accounts</span>
+                      <strong>{selectedProfileSummary.accounts}</strong>
+                      <p>Directory and app accounts attached to this profile record.</p>
+                    </article>
+                    <article className="detail-card">
+                      <span>Consent records</span>
+                      <strong>{selectedProfileSummary.consents}</strong>
+                      <p>Tracked legal and household consent checkpoints.</p>
+                    </article>
+                    <article className="detail-card">
+                      <span>Supports logged</span>
+                      <strong>{selectedProfileSummary.supports}</strong>
+                      <p>Accessibility, assistive, and learning supports captured so far.</p>
+                    </article>
+                    <article className="detail-card">
+                      <span>Communication signals</span>
+                      <strong>{selectedProfileSummary.communicationSignals}</strong>
+                      <p>Channels, cadence, and boundaries agents should respect.</p>
+                    </article>
                   </div>
 
                   <div className="section-grid">
@@ -1049,114 +1199,146 @@ export default function Page() {
                       </div>
                     </div>
 
-                    <div className="section-grid">
-                      <SelectField
-                        label="Source person"
-                        value={relationshipDraft.source_person_id}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, source_person_id: value }))}
-                      >
-                        {context?.persons.map((person) => (
-                          <option key={`source-${person.person_id}`} value={person.person_id}>
-                            {person.display_name}
-                          </option>
-                        ))}
-                      </SelectField>
-                      <SelectField
-                        label="Target person"
-                        value={relationshipDraft.target_person_id}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, target_person_id: value }))}
-                      >
-                        {context?.persons.map((person) => (
-                          <option key={`target-${person.person_id}`} value={person.person_id}>
-                            {person.display_name}
-                          </option>
-                        ))}
-                      </SelectField>
-                      <SelectField
-                        label="Relationship type"
-                        value={relationshipDraft.relationship_type}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, relationship_type: value as RelationshipType }))}
-                      >
-                        {RELATIONSHIP_OPTIONS.map((item) => (
-                          <option key={item.value} value={item.value}>
-                            {item.label}
-                          </option>
-                        ))}
-                      </SelectField>
-                      <Field
-                        label="Status"
-                        value={relationshipDraft.status}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, status: value }))}
-                      />
-                      <ToggleField
-                        label="Mutual edge"
-                        checked={relationshipDraft.is_mutual}
-                        onChange={(checked) => setRelationshipDraft((current) => ({ ...current, is_mutual: checked }))}
-                      />
-                      <div />
-                      <TextAreaField
-                        label="Notes"
-                        value={relationshipDraft.notes}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, notes: value }))}
-                      />
-                      <TextAreaField
-                        label="Metadata JSON"
-                        value={relationshipDraft.metadata}
-                        onChange={(value) => setRelationshipDraft((current) => ({ ...current, metadata: value }))}
-                        placeholder='{"context":"weekly piano lessons"}'
-                      />
-                    </div>
+                    <div className="relationship-workspace">
+                      <section className="relationship-composer">
+                        <div className="panel-head">
+                          <div>
+                            <h4>{relationshipDraft.relationship_id ? "Edit relationship" : "Add relationship"}</h4>
+                            <p className="muted-copy">
+                              Capture the edge directly from this workspace so plans, questions, and events can use the same people context.
+                            </p>
+                          </div>
+                        </div>
 
-                    <div className="button-row">
-                      <button className="button" disabled={savingRelationship} onClick={saveRelationship} type="button">
-                        {savingRelationship ? "Saving relationship..." : relationshipDraft.relationship_id ? "Update relationship" : "Add relationship"}
-                      </button>
-                      <button
-                        className="button button-secondary"
-                        onClick={() =>
-                          setRelationshipDraft({
-                            ...emptyProfile(),
-                            source_person_id: selectedPersonId,
-                            target_person_id: context?.persons.find((person) => person.person_id !== selectedPersonId)?.person_id || selectedPersonId,
-                          })
-                        }
-                        type="button"
-                      >
-                        Clear draft
-                      </button>
-                    </div>
+                        <div className="section-grid">
+                          <SelectField
+                            label="Source person"
+                            value={relationshipDraft.source_person_id}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, source_person_id: value }))}
+                          >
+                            {context?.persons.map((person) => (
+                              <option key={`source-${person.person_id}`} value={person.person_id}>
+                                {person.display_name}
+                              </option>
+                            ))}
+                          </SelectField>
+                          <SelectField
+                            label="Target person"
+                            value={relationshipDraft.target_person_id}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, target_person_id: value }))}
+                          >
+                            {context?.persons.map((person) => (
+                              <option key={`target-${person.person_id}`} value={person.person_id}>
+                                {person.display_name}
+                              </option>
+                            ))}
+                          </SelectField>
+                          <SelectField
+                            label="Relationship type"
+                            value={relationshipDraft.relationship_type}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, relationship_type: value as RelationshipType }))}
+                          >
+                            {RELATIONSHIP_OPTIONS.map((item) => (
+                              <option key={item.value} value={item.value}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </SelectField>
+                          <Field
+                            label="Status"
+                            value={relationshipDraft.status}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, status: value }))}
+                          />
+                          <ToggleField
+                            label="Mutual edge"
+                            checked={relationshipDraft.is_mutual}
+                            onChange={(checked) => setRelationshipDraft((current) => ({ ...current, is_mutual: checked }))}
+                          />
+                          <div className="relationship-helper-card">
+                            <span>Draft check</span>
+                            <strong>
+                              {relationshipDisabledReason
+                                ? relationshipDisabledReason
+                                : `${personName(context, relationshipDraft.source_person_id)} -> ${personName(context, relationshipDraft.target_person_id)}`}
+                            </strong>
+                            <p className="helper">
+                              {relationshipDraft.relationship_id ? "Editing an existing graph edge." : "A new edge will be added to the selected person's relationship graph."}
+                            </p>
+                          </div>
+                          <TextAreaField
+                            label="Notes"
+                            value={relationshipDraft.notes}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, notes: value }))}
+                          />
+                          <TextAreaField
+                            label="Metadata JSON"
+                            value={relationshipDraft.metadata}
+                            onChange={(value) => setRelationshipDraft((current) => ({ ...current, metadata: value }))}
+                            placeholder='{"context":"weekly piano lessons"}'
+                          />
+                        </div>
 
-                    {!draft.relationships.length ? (
-                      <div className="empty-state">No relationship edges recorded for this person yet.</div>
-                    ) : (
-                      <div className="relationship-list">
-                        {draft.relationships.map((item) => (
-                          <article className="relationship-card" key={item.relationship_id}>
-                            <div className="relationship-title">
-                              <strong>
-                                {personName(context, item.source_person_id)}
-                                {" -> "}
-                                {personName(context, item.target_person_id)}
-                              </strong>
-                              <div className="relationship-meta">
-                                <span className="status-chip tone-sky">{item.relationship_type.replace(/_/g, " ")}</span>
-                                <span className={item.status === "active" ? "status-chip tone-leaf" : "status-chip tone-muted"}>{item.status}</span>
-                                {item.is_mutual ? <span className="status-chip tone-warn">mutual</span> : null}
-                              </div>
-                            </div>
-                            {item.notes ? <p className="muted-copy">{item.notes}</p> : null}
-                            <div className="button-row">
-                              <button className="button button-secondary" onClick={() => editRelationship(item)} type="button">
-                                Edit
-                              </button>
-                              <button className="button button-danger" onClick={() => deleteRelationship(item)} type="button">
-                                Remove
-                              </button>
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    )}
+                        <div className="button-row">
+                          <button className="button" disabled={savingRelationship || Boolean(relationshipDisabledReason)} onClick={saveRelationship} type="button">
+                            {savingRelationship ? "Saving relationship..." : relationshipDraft.relationship_id ? "Update relationship" : "Add relationship"}
+                          </button>
+                          <button
+                            className="button button-secondary"
+                            onClick={() =>
+                              setRelationshipDraft({
+                                ...emptyProfile(),
+                                source_person_id: selectedPersonId,
+                                target_person_id: context?.persons.find((person) => person.person_id !== selectedPersonId)?.person_id || selectedPersonId,
+                              })
+                            }
+                            type="button"
+                          >
+                            Clear draft
+                          </button>
+                        </div>
+                      </section>
+
+                      <section className="relationship-list-panel">
+                        <div className="panel-head">
+                          <div>
+                            <h4>Existing edges</h4>
+                            <p className="muted-copy">Review the living graph before you add a new support relationship.</p>
+                          </div>
+                        </div>
+
+                        {!draft.relationships.length ? (
+                          <div className="empty-state">No relationship edges recorded for this person yet.</div>
+                        ) : (
+                          <div className="relationship-list">
+                            {draft.relationships.map((item) => (
+                              <article className="relationship-card" key={item.relationship_id}>
+                                <div className="relationship-title">
+                                  <strong>
+                                    {personName(context, item.source_person_id)}
+                                    {" -> "}
+                                    {personName(context, item.target_person_id)}
+                                  </strong>
+                                  <div className="relationship-meta">
+                                    <span className="status-chip tone-sky">{formatLabel(item.relationship_type)}</span>
+                                    <span className={`status-chip ${statusTone(item.status)}`}>{item.status}</span>
+                                    {item.is_mutual ? <span className="status-chip tone-sun">mutual</span> : null}
+                                  </div>
+                                </div>
+                                {item.notes ? <p className="muted-copy">{item.notes}</p> : null}
+                                <div className="button-row">
+                                  <button className="button button-secondary" onClick={() => editRelationship(item)} type="button">
+                                    Edit
+                                  </button>
+                                  <button className="button button-danger" onClick={() => deleteRelationship(item)} type="button">
+                                    Remove
+                                  </button>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    </div>
                   </section>
                 </>
               )}

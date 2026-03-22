@@ -36,7 +36,7 @@ def _json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-KNOWN_DOMAINS = ("decision", "task", "file", "note", "education", "profile")
+KNOWN_DOMAINS = ("decision", "task", "file", "note", "education", "profile", "planning")
 METADATA_TOPIC_KEYS = ("note_type", "category", "project", "bucket", "status", "score_type", "area", "goal")
 
 

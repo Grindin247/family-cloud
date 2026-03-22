@@ -9,6 +9,8 @@ SUBJECT_BY_DOMAIN: dict[AllowedDomain, str] = {
     "file": "family.events.file",
     "note": "family.events.file",
     "education": "family.events.education",
+    "profile": "family.events.profile",
+    "planning": "family.events.planning",
 }
 
 

@@ -35,6 +35,7 @@ def test_top_level_workspace_prompts_encode_insight_routing_and_precedence_rules
         assert '"I had a rough time at basketball practice. Only made 5/10 shots"' in text
         assert "learner-specific education records always go to `education-agent`, not `event-agent`" in text
         assert "durable person profile and relationship context goes to `profile-agent`" in text
+        assert "structured family or person plans, routines, habits, programs, and plan check-ins go to `planning-agent`" in text
         assert "canonical family conversation or activity summaries go to `record_family_event`" in text
         assert "deferred clarification goes to `create_agent_question`" in text
         assert "do not log pure greetings, one-word acknowledgements, trivial banter, or repeated low-value chatter with no durable insight" in text
@@ -49,6 +50,15 @@ def test_top_level_workspace_prompts_route_profile_domain_to_profile_agent() -> 
         assert "dietary preferences" in text
         assert "accessibility needs" in text
         assert "relationship mapping" in text or "relationship graph" in text
+
+
+def test_top_level_workspace_prompts_route_planning_domain_to_planning_agent() -> None:
+    for prompt_name in ("caleb", "amelia_workspace"):
+        text = _read(prompt_name)
+        assert "Delegate to `planning-agent` for any request about:" in text
+        assert "plans, routines, habits, or programs" in text
+        assert "meal plans, fitness plans, study plans" in text
+        assert "plan previews, activation, pause/archive, adherence, or plan check-ins" in text
 
 
 def test_amelia_identity_prompt_matches_shared_supportive_small_talk_policy() -> None:

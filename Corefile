@@ -13,6 +13,7 @@
     192.168.1.52 education.family.callender
     192.168.1.52 questions.family.callender
     192.168.1.52 profiles.family.callender
+    192.168.1.52 planning.family.callender
     fallthrough
     }
 

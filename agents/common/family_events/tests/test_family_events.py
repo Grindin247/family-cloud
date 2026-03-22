@@ -27,6 +27,7 @@ def test_subject_for_domain():
     assert subject_for_domain("decision") == "family.events.decision"
     assert subject_for_domain("note") == "family.events.file"
     assert subject_for_domain("education") == "family.events.education"
+    assert subject_for_domain("planning") == "family.events.planning"
 
 
 def test_education_service_agent_id_allowed():
@@ -44,6 +45,23 @@ def test_education_service_agent_id_allowed():
     )
     validate_event_envelope(event)
     assert event["domain"] == "education"
+
+
+def test_planning_service_agent_id_allowed():
+    event = build_event(
+        family_id=2,
+        domain="planning",
+        event_type="plan.created",
+        actor={"actor_type": "user", "actor_id": "admin@example.com"},
+        subject={"subject_type": "plan", "subject_id": "plan-1"},
+        payload={"plan_id": "plan-1", "entity_type": "plan"},
+        source={"agent_id": "PlanningService", "runtime": "backend"},
+        privacy=make_privacy(contains_pii=True),
+        occurred_at=datetime(2026, 3, 22, 12, 0, tzinfo=UTC),
+        recorded_at=datetime(2026, 3, 22, 12, 1, tzinfo=UTC),
+    )
+    validate_event_envelope(event)
+    assert event["domain"] == "planning"
 
 
 def test_invalid_agent_id_rejected():

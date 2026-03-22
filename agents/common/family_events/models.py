@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-AllowedDomain = Literal["decision", "task", "file", "note", "education"]
+AllowedDomain = Literal["decision", "task", "file", "note", "education", "profile", "planning"]
 AllowedRuntime = Literal["openclaw-subagent", "openclaw-acp", "backend"]
 AllowedPrivacyClassification = Literal["private", "family", "research", "commercial"]
 AllowedExportPolicy = Literal["never", "restricted", "anonymizable", "exportable"]
@@ -83,8 +83,19 @@ class FamilyEvent(BaseModel):
         expected_prefix = f"{self.subject.subject_type}."
         if not self.event_type.startswith(expected_prefix):
             raise ValueError(f"event_type must start with '{expected_prefix}'")
-        if self.source.agent_id not in {"DecisionAgent", "TaskAgent", "FileAgent", "EducationService", "EducationAgent", "Vikunja"}:
+        if self.source.agent_id not in {
+            "DecisionAgent",
+            "TaskAgent",
+            "FileAgent",
+            "EducationService",
+            "EducationAgent",
+            "ProfileService",
+            "profile-management-service",
+            "PlanningService",
+            "PlanningAgent",
+            "Vikunja",
+        }:
             raise ValueError(
-                "source.agent_id must be one of DecisionAgent, TaskAgent, FileAgent, EducationService, EducationAgent, or Vikunja"
+                "source.agent_id must be one of DecisionAgent, TaskAgent, FileAgent, EducationService, EducationAgent, ProfileService, profile-management-service, PlanningService, PlanningAgent, or Vikunja"
             )
         return self
