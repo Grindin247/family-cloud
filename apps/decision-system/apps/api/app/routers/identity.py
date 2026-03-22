@@ -144,7 +144,7 @@ def list_features(
     if actor is not None:
         require_family_member(db, family_id, actor)
     items = []
-    for feature_key in ("decision", "tasks", "files", "events", "health", "education", "finance"):
+    for feature_key in ("decision", "tasks", "files", "events", "profile", "health", "education", "finance"):
         enabled = feature_enabled(db, family_id, feature_key)
         row = db.query(FamilyFeature).filter(FamilyFeature.family_id == family_id, FamilyFeature.feature_key == feature_key).one_or_none()
         if row is None:

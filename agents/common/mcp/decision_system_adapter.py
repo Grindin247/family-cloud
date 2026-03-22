@@ -211,12 +211,16 @@ def _to_plan(op: PlannedOperation) -> _OperationPlan:
 class DecisionSystemTools:
     http: HttpToolClient
     event_http: HttpToolClient | None = None
+    question_http: HttpToolClient | None = None
 
     def _headers(self, actor_email: str | None) -> dict[str, str] | None:
         return {"X-Dev-User": actor_email} if actor_email else None
 
     def _event_client(self) -> HttpToolClient:
         return self.event_http or HttpToolClient(base_url=settings.family_event_api_base_url)
+
+    def _question_client(self) -> HttpToolClient:
+        return self.question_http or HttpToolClient(base_url=settings.question_api_base_url)
 
     def list_families(self, *, actor_email: str | None = None) -> list[dict[str, Any]]:
         return self.http.request("GET", "/families", headers=self._headers(actor_email)).result["items"]
@@ -549,9 +553,9 @@ class DecisionSystemTools:
         expires_at: str | None = None,
         actor_email: str | None = None,
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._question_client().request(
             "POST",
-            f"/family/{family_id}/ops/questions",
+            f"/families/{family_id}/questions",
             json_body={
                 "domain": domain,
                 "source_agent": source_agent,
@@ -559,6 +563,7 @@ class DecisionSystemTools:
                 "summary": summary,
                 "prompt": prompt,
                 "urgency": urgency,
+                "category": topic_type,
                 "topic_type": topic_type,
                 "dedupe_key": dedupe_key,
                 "context": context or {},
@@ -583,9 +588,9 @@ class DecisionSystemTools:
             params["domain"] = domain
         if status is not None:
             params["status"] = status
-        return self.http.request(
+        return self._question_client().request(
             "GET",
-            f"/family/{family_id}/ops/questions",
+            f"/families/{family_id}/questions",
             params=params,
             headers=self._headers(actor_email),
         ).result["items"]
@@ -611,9 +616,9 @@ class DecisionSystemTools:
             body["prompt"] = prompt
         if answer_sufficiency_state is not None:
             body["answer_sufficiency_state"] = answer_sufficiency_state
-        return self.http.request(
+        return self._question_client().request(
             "PATCH",
-            f"/family/{family_id}/ops/questions/{question_id}",
+            f"/families/{family_id}/questions/{question_id}",
             json_body=body,
             headers=self._headers(actor_email),
         ).result
@@ -624,12 +629,46 @@ class DecisionSystemTools:
         question_id: str,
         *,
         delivery_agent: str,
+        delivery_channel: str = "discord_dm",
+        claim_token: str | None = None,
         actor_email: str | None = None,
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._question_client().request(
             "POST",
-            f"/family/{family_id}/ops/questions/{question_id}/asked",
-            json_body={"delivery_agent": delivery_agent, "delivery_context": {}},
+            f"/families/{family_id}/questions/{question_id}/asked",
+            json_body={"delivery_agent": delivery_agent, "delivery_channel": delivery_channel, "claim_token": claim_token, "delivery_context": {}},
+            headers=self._headers(actor_email),
+        ).result
+
+    def answer_agent_question(
+        self,
+        family_id: int,
+        question_id: str,
+        *,
+        answer_text: str,
+        status: str = "resolved",
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self._question_client().request(
+            "POST",
+            f"/families/{family_id}/questions/{question_id}/answer",
+            json_body={"answer_text": answer_text, "status": status},
+            headers=self._headers(actor_email),
+        ).result
+
+    def claim_agent_questions(
+        self,
+        family_id: int,
+        *,
+        agent_id: str,
+        channel: str = "discord_dm",
+        force: bool = False,
+        actor_email: str | None = None,
+    ) -> dict[str, Any]:
+        return self._question_client().request(
+            "POST",
+            f"/families/{family_id}/questions/claim-next",
+            json_body={"agent_id": agent_id, "channel": channel, "force": force},
             headers=self._headers(actor_email),
         ).result
 
@@ -649,9 +688,9 @@ class DecisionSystemTools:
             body["resolution_note"] = resolution_note
         if answer_sufficiency_state is not None:
             body["answer_sufficiency_state"] = answer_sufficiency_state
-        return self.http.request(
+        return self._question_client().request(
             "POST",
-            f"/family/{family_id}/ops/questions/{question_id}/resolve",
+            f"/families/{family_id}/questions/{question_id}/resolve",
             json_body=body,
             headers=self._headers(actor_email),
         ).result

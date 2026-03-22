@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 SERVER_NAME = "decision-system-mcp"
 API_BASE = os.getenv("DECISION_API_BASE_URL", "http://localhost:8000/v1").rstrip("/")
 EVENT_API_BASE = os.getenv("FAMILY_EVENT_API_BASE_URL", "http://localhost:8010/v1").rstrip("/")
+QUESTION_API_BASE = os.getenv("QUESTION_API_BASE_URL", "http://localhost:8030/v1").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("DECISION_MCP_HTTP_TIMEOUT_SECONDS", "20"))
 AUDIT_LOG_PATH = os.getenv("DECISION_MCP_AUDIT_LOG_PATH", ".decision_mcp_audit.jsonl")
 
@@ -137,6 +138,41 @@ def _event_request(
     response = requests.request(
         method=method,
         url=f"{EVENT_API_BASE}{path}",
+        params=query,
+        json=body,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 204:
+        return {"status_code": response.status_code, "body": None}
+    try:
+        parsed = response.json()
+    except requests.JSONDecodeError:
+        parsed = {"raw": response.text}
+    if not response.ok:
+        raise RuntimeError(f"{method} {path} failed ({response.status_code}): {parsed}")
+    return {"status_code": response.status_code, "body": parsed}
+
+
+def _question_request(
+    method: str,
+    path: str,
+    actor_id: str,
+    actor_name: str | None,
+    body: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Decision-Actor-Id": actor_id,
+    }
+    if actor_id:
+        headers["X-Dev-User"] = actor_id
+    if actor_name:
+        headers["X-Decision-Actor-Name"] = actor_name
+    response = requests.request(
+        method=method,
+        url=f"{QUESTION_API_BASE}{path}",
         params=query,
         json=body,
         headers=headers,
@@ -1032,9 +1068,9 @@ def create_agent_question(
     expires_at: str | None = None,
 ) -> dict[str, Any]:
     """Create or update a queued agent question."""
-    return _request(
+    return _question_request(
         "POST",
-        f"/family/{family_id}/ops/questions",
+        f"/families/{family_id}/questions",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
         body={
@@ -1044,6 +1080,7 @@ def create_agent_question(
             "summary": summary,
             "prompt": prompt,
             "urgency": urgency,
+            "category": topic_type,
             "topic_type": topic_type,
             "dedupe_key": dedupe_key,
             "context": context or {},
@@ -1068,9 +1105,9 @@ def list_agent_questions(
         query["domain"] = domain
     if status is not None:
         query["status"] = status
-    return _request(
+    return _question_request(
         "GET",
-        f"/family/{family_id}/ops/questions",
+        f"/families/{family_id}/questions",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
         query=query,
@@ -1098,9 +1135,9 @@ def update_agent_question(
         body["prompt"] = prompt
     if answer_sufficiency_state is not None:
         body["answer_sufficiency_state"] = answer_sufficiency_state
-    return _request(
+    return _question_request(
         "PATCH",
-        f"/family/{family_id}/ops/questions/{question_id}",
+        f"/families/{family_id}/questions/{question_id}",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
         body=body,
@@ -1108,14 +1145,51 @@ def update_agent_question(
 
 
 @mcp.tool()
-def mark_agent_question_asked(family_id: int, question_id: str, actor_id: str, delivery_agent: str) -> dict[str, Any]:
-    """Mark a queued question as asked by a top-level agent."""
-    return _request(
+def claim_agent_question(family_id: int, actor_id: str, agent_name: str, channel: str = "discord_dm", force: bool = False) -> dict[str, Any]:
+    """Claim the next eligible queued question for proactive delivery."""
+    return _question_request(
         "POST",
-        f"/family/{family_id}/ops/questions/{question_id}/asked",
+        f"/families/{family_id}/questions/claim-next",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
-        body={"delivery_agent": delivery_agent, "delivery_context": {}},
+        body={"agent_id": agent_name, "channel": channel, "force": force},
+    )["body"]
+
+
+@mcp.tool()
+def mark_agent_question_asked(
+    family_id: int,
+    question_id: str,
+    actor_id: str,
+    delivery_agent: str,
+    delivery_channel: str = "discord_dm",
+    claim_token: str | None = None,
+) -> dict[str, Any]:
+    """Mark a queued question as asked by a top-level agent."""
+    return _question_request(
+        "POST",
+        f"/families/{family_id}/questions/{question_id}/asked",
+        actor_id=actor_id,
+        actor_name=SERVER_NAME,
+        body={"delivery_agent": delivery_agent, "delivery_channel": delivery_channel, "claim_token": claim_token, "delivery_context": {}},
+    )["body"]
+
+
+@mcp.tool()
+def answer_agent_question(
+    family_id: int,
+    question_id: str,
+    actor_id: str,
+    answer_text: str,
+    status: str = "resolved",
+) -> dict[str, Any]:
+    """Store a user answer for a queued question."""
+    return _question_request(
+        "POST",
+        f"/families/{family_id}/questions/{question_id}/answer",
+        actor_id=actor_id,
+        actor_name=SERVER_NAME,
+        body={"answer_text": answer_text, "status": status},
     )["body"]
 
 
@@ -1134,9 +1208,9 @@ def resolve_agent_question(
         body["resolution_note"] = resolution_note
     if answer_sufficiency_state is not None:
         body["answer_sufficiency_state"] = answer_sufficiency_state
-    return _request(
+    return _question_request(
         "POST",
-        f"/family/{family_id}/ops/questions/{question_id}/resolve",
+        f"/families/{family_id}/questions/{question_id}/resolve",
         actor_id=actor_id,
         actor_name=SERVER_NAME,
         body=body,

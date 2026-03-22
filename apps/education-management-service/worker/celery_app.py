@@ -17,5 +17,9 @@ celery_app.conf.beat_schedule = {
         "task": "worker.tasks.refresh_current_snapshots",
         "schedule": 1800.0,
     },
+    "education-generate-questions": {
+        "task": "worker.tasks.generate_pending_education_questions",
+        "schedule": 1800.0,
+    },
 }
 celery_app.conf.timezone = "UTC"

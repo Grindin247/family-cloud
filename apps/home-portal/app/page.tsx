@@ -8,7 +8,7 @@ const POST_TILE_IDS = new Set(["new-doc", "whiteboard", "process-inbox"]);
 
 function groupCopy(group: PortalGroup): string {
   if (group === "Start") return "Fresh starts for the next thing you need to capture.";
-  if (group === "Plan") return "Shared workspaces for decisions, tasks, and momentum.";
+  if (group === "Plan") return "Shared workspaces for decisions, tasks, learning, and momentum.";
   if (group === "Keep") return "The family memory shelf for everyday information.";
   return "Relaxed spaces for the things you want close at hand.";
 }
@@ -62,6 +62,24 @@ function TileIcon({ icon }: { icon: PortalIcon }) {
           <path {...common} d="M16 20V8.5" />
           <path {...common} d="M22 20v-5.5" />
           <path {...common} d="M7 11.5c2.5 0 2.5-3.5 5-3.5s2.5 3.5 5 3.5 2.5-3.5 5-3.5 2.5 3.5 5 3.5" />
+        </svg>
+      );
+    case "education":
+      return (
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path {...common} d="M6 11.5 16 7l10 4.5L16 16z" />
+          <path {...common} d="M10 14v5.5c0 .8 2.7 2.5 6 2.5s6-1.7 6-2.5V14" />
+          <path {...common} d="M26 11.5V20" />
+          <path {...common} d="M26 20c0 .8-.7 1.5-1.5 1.5S23 20.8 23 20s.7-1.5 1.5-1.5S26 19.2 26 20Z" />
+        </svg>
+      );
+    case "profile":
+      return (
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <circle {...common} cx="12" cy="11" r="4" />
+          <path {...common} d="M5.5 24c1.2-4.2 4.2-6.5 8-6.5s6.8 2.3 8 6.5" />
+          <circle {...common} cx="23.5" cy="12.5" r="2.5" />
+          <path {...common} d="M19.5 22c.8-2.3 2.4-3.5 4.3-3.5 1.4 0 2.7.7 3.7 2.1" />
         </svg>
       );
     case "notes":

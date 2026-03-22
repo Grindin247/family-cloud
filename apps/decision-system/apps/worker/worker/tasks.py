@@ -46,6 +46,10 @@ def _headers(token: str) -> dict[str, str]:
     return {"X-Internal-Admin-Token": token}
 
 
+def _question_headers(question_token: str) -> dict[str, str]:
+    return {"X-Internal-Admin-Token": question_token}
+
+
 def _iso_to_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -57,8 +61,8 @@ def _iso_to_date(value: str | None) -> date | None:
 
 def _upsert_question(base: str, token: str, family_id: int, payload: dict) -> None:
     httpx.post(
-        f"{base}/family/{family_id}/ops/questions",
-        headers=_headers(token),
+        f"{base}/families/{family_id}/questions",
+        headers=_question_headers(token),
         json=payload,
         timeout=30.0,
     ).raise_for_status()
@@ -76,7 +80,9 @@ def _record_event(base: str, token: str, family_id: int, payload: dict) -> None:
 @celery_app.task
 def send_due_soon_summary():
     base = os.environ.get("DECISION_API_BASE_URL", "http://api:8000/v1").rstrip("/")
+    question_base = os.environ.get("QUESTION_API_BASE_URL", base).rstrip("/")
     token = os.environ.get("INTERNAL_ADMIN_TOKEN", "")
+    question_token = os.environ.get("QUESTION_INTERNAL_ADMIN_TOKEN", token)
     if not token:
         return {"job": "due_soon_summary", "status": "skipped", "reason": "missing INTERNAL_ADMIN_TOKEN"}
 
@@ -119,8 +125,8 @@ def send_due_soon_summary():
                         "Should it be pushed out, marked complete, or removed?"
                     )
                     _upsert_question(
-                        base,
-                        token,
+                        question_base,
+                        question_token,
                         family_id,
                         {
                             "domain": "decision",
@@ -190,7 +196,9 @@ def send_roadmap_nudges():
 @celery_app.task
 def run_decision_health_checks():
     base = os.environ.get("DECISION_API_BASE_URL", "http://api:8000/v1").rstrip("/")
+    question_base = os.environ.get("QUESTION_API_BASE_URL", base).rstrip("/")
     token = os.environ.get("INTERNAL_ADMIN_TOKEN", "")
+    question_token = os.environ.get("QUESTION_INTERNAL_ADMIN_TOKEN", token)
     if not token:
         return {"job": "decision_health_checks", "status": "skipped", "reason": "missing INTERNAL_ADMIN_TOKEN"}
 
@@ -230,8 +238,8 @@ def run_decision_health_checks():
                 )
                 try:
                     _upsert_question(
-                        base,
-                        token,
+                        question_base,
+                        question_token,
                         family_id,
                         {
                             "domain": "decision",
@@ -263,8 +271,8 @@ def run_decision_health_checks():
                 )
                 try:
                     _upsert_question(
-                        base,
-                        token,
+                        question_base,
+                        question_token,
                         family_id,
                         {
                             "domain": "decision",
@@ -294,8 +302,8 @@ def run_decision_health_checks():
                 )
                 try:
                     _upsert_question(
-                        base,
-                        token,
+                        question_base,
+                        question_token,
                         family_id,
                         {
                             "domain": "decision",
@@ -335,8 +343,8 @@ def run_decision_health_checks():
         if goal_updates_today and active_decisions:
             try:
                 _upsert_question(
-                    base,
-                    token,
+                    question_base,
+                    question_token,
                     family_id,
                     {
                         "domain": "decision",
@@ -384,7 +392,9 @@ def run_decision_health_checks():
 @celery_app.task
 def run_task_health_checks():
     base = os.environ.get("DECISION_API_BASE_URL", "http://api:8000/v1").rstrip("/")
+    question_base = os.environ.get("QUESTION_API_BASE_URL", base).rstrip("/")
     token = os.environ.get("INTERNAL_ADMIN_TOKEN", "")
+    question_token = os.environ.get("QUESTION_INTERNAL_ADMIN_TOKEN", token)
     if not token:
         return {"job": "task_health_checks", "status": "skipped", "reason": "missing INTERNAL_ADMIN_TOKEN"}
 
@@ -441,8 +451,8 @@ def run_task_health_checks():
                     pass
             try:
                 _upsert_question(
-                    base,
-                    token,
+                    question_base,
+                    question_token,
                     family_id,
                     {
                         "domain": "task",

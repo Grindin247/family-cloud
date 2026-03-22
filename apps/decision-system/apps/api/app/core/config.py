@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     note_embedding_timeout_seconds: float = 20.0
     family_event_api_base_url: str = "http://family-event-api:8000/v1"
     family_event_internal_admin_token: str = "change-me"
+    question_api_base_url: str = "http://question-api:8000/v1"
+    question_internal_admin_token: str = "change-me"
     decision_self_api_base_url: str = "http://decision-api:8000/v1"
     task_vikunja_url: str = "http://vikunja:3456"
     task_vikunja_api_prefix: str = "/api/v1"

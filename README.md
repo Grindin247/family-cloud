@@ -237,6 +237,7 @@ Once DNS + cert trust is set up:
 - Tasks/Kanban (Vikunja): `https://tasks.${FAMILY_DOMAIN}`
 - Decision system: `https://decision.${FAMILY_DOMAIN}`
 - Family events: `https://events.${FAMILY_DOMAIN}`
+- Education management: `https://education.${FAMILY_DOMAIN}`
 
 The home portal is the main family-facing entrypoint. It gives you a single launcher for quick notes, whiteboarding, tasks, goals, files, and future family tools.
 
@@ -265,11 +266,12 @@ Example (Windows): edit `C:\Windows\System32\drivers\etc\hosts` as Admin:
 192.168.1.27 tasks.family.callender
 192.168.1.27 decision.family.callender
 192.168.1.27 events.family.callender
+192.168.1.27 education.family.callender
 ```
 
 Example (Linux/macOS): edit `/etc/hosts`:
 ```
-192.168.1.27 traefik.family.callender home.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender events.family.callender
+192.168.1.27 traefik.family.callender home.family.callender keycloak.family.callender nextcloudsetup.family.callender nextcloud.family.callender tasks.family.callender decision.family.callender events.family.callender education.family.callender
 ```
 
 #### B2) Use CoreDNS manually on one machine

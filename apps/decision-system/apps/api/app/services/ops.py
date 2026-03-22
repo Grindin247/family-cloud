@@ -64,6 +64,24 @@ def _post_canonical_event(event: dict[str, Any]) -> str | None:
     return str(event_id) if event_id else None
 
 
+def _question_service_headers() -> dict[str, str]:
+    return {"X-Internal-Admin-Token": settings.question_internal_admin_token}
+
+
+def _question_service_get(path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = httpx.get(
+        f"{settings.question_api_base_url.rstrip('/')}{path}",
+        headers=_question_service_headers(),
+        params=params,
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("question-service returned invalid JSON")
+    return payload
+
+
 def _question_response(question: AgentQuestion) -> dict[str, Any]:
     return {
         "id": question.id,
@@ -680,21 +698,38 @@ def query_metrics(
     goal_updates_count = db.execute(select(func.count()).select_from(usage_base).where(usage_base.c.event_type.in_(["goal_created", "goal_updated", "goal_deleted"]))).scalar_one()
     add("goal_updates_count", float(goal_updates_count))
 
-    question_query = select(func.count()).select_from(AgentQuestion).where(
-        AgentQuestion.family_id == family_id,
-        AgentQuestion.status.in_(sorted(ACTIVE_QUESTION_STATUSES)),
-    )
-    add("question_queue_open_count", float(db.execute(question_query).scalar_one()))
+    try:
+        question_items = _question_service_get(
+            f"/families/{family_id}/questions",
+            params={"include_inactive": "true"},
+        ).get("items", [])
+        question_open_count = sum(1 for item in question_items if item.get("status") in ACTIVE_QUESTION_STATUSES)
+        add("question_queue_open_count", float(question_open_count))
 
-    question_resolved_query = select(func.count()).select_from(AgentQuestionEvent).where(
-        AgentQuestionEvent.family_id == family_id,
-        AgentQuestionEvent.event_type == "resolved",
-    )
-    if start_at:
-        question_resolved_query = question_resolved_query.where(AgentQuestionEvent.created_at >= start_at)
-    if end_at:
-        question_resolved_query = question_resolved_query.where(AgentQuestionEvent.created_at <= end_at)
-    add("question_queue_resolved_count", float(db.execute(question_resolved_query).scalar_one()))
+        question_events = _question_service_get(
+            f"/families/{family_id}/questions/history",
+        ).get("events", [])
+        resolved_count = 0
+        for event in question_events:
+            if event.get("event_type") != "resolved":
+                continue
+            created_at = event.get("created_at")
+            if isinstance(created_at, str):
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                except Exception:
+                    created_dt = None
+            else:
+                created_dt = None
+            if start_at and created_dt and created_dt < start_at:
+                continue
+            if end_at and created_dt and created_dt > end_at:
+                continue
+            resolved_count += 1
+        add("question_queue_resolved_count", float(resolved_count))
+    except Exception:
+        add("question_queue_open_count", 0.0)
+        add("question_queue_resolved_count", 0.0)
 
     task_created_count = db.execute(select(func.count()).select_from(usage_base).where(usage_base.c.event_type == "task_created")).scalar_one()
     add("task_created_count", float(task_created_count))

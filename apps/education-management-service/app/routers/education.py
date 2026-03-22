@@ -30,24 +30,35 @@ from app.models.education import (
 from app.schemas.education import (
     ActivityCreate,
     ActivityResponse,
+    ActivityUpdate,
     AssessmentCreate,
     AssessmentResponse,
+    AssessmentUpdate,
     AssignmentCreate,
     AssignmentResponse,
     AssignmentUpdate,
     AttachmentCreate,
     AttachmentResponse,
+    DashboardTrendPointResponse,
     DomainResponse,
+    EducationFeatureResponse,
+    EducationFeatureUpdate,
     EducationSummaryResponse,
+    EducationViewerContextResponse,
+    EducationViewerMeResponse,
+    FamilyDashboardResponse,
     GoalCreate,
     GoalResponse,
     GoalUpdate,
     JournalCreate,
     JournalResponse,
+    JournalUpdate,
     LearnerCreate,
     LearnerResponse,
+    LearnerUpdate,
     PracticeRepetitionCreate,
     PracticeRepetitionResponse,
+    PracticeRepetitionUpdate,
     ProgressSnapshotResponse,
     QuizCreate,
     QuizDetailResponse,
@@ -58,15 +69,28 @@ from app.schemas.education import (
     QuizSessionResponse,
     SkillResponse,
     StatsResponse,
+    ViewerPersonResponse,
 )
-from app.services.decision_api import ensure_education_enabled, ensure_family_access, get_family_person
+from app.services.decision_api import (
+    ensure_education_enabled,
+    ensure_family_access,
+    get_family_context,
+    get_family_features,
+    get_family_person,
+    get_family_persons,
+    get_me,
+    update_family_feature,
+)
 from app.services.education import (
+    build_family_dashboard,
     calculate_stats,
     consume_idempotency,
     create_event_log,
     ensure_seed_data,
     normalize_actor,
     recent_rows,
+    refresh_snapshot_scopes,
+    refresh_snapshot_transition,
     refresh_snapshots,
     store_idempotency_result,
     try_publish_event_rows,
@@ -91,6 +115,15 @@ def _caller_email(x_forwarded_user: str | None, x_dev_user: str | None) -> str |
 def _ensure_scope(*, family_id: int, actor_email: str | None, internal_admin: bool) -> None:
     ensure_family_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
     ensure_education_enabled(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
+
+
+def _ensure_family_access_only(*, family_id: int, actor_email: str | None, internal_admin: bool) -> None:
+    ensure_family_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
+
+
+def _education_enabled(*, family_id: int, actor_email: str | None, internal_admin: bool) -> bool:
+    features = get_family_features(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
+    return next((bool(item.get("enabled")) for item in features if item.get("feature_key") == "education"), False)
 
 
 def _learner_or_404(db: Session, *, family_id: int, learner_id: UUID) -> LearnerProfile:
@@ -152,6 +185,90 @@ def _goal_or_404(db: Session, *, goal_id: UUID) -> LearningGoal:
 
 def _serialize(model_cls, obj):
     return model_cls.model_validate(obj, from_attributes=True)
+
+
+@router.get("/me", response_model=EducationViewerMeResponse)
+def viewer_me(
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    return EducationViewerMeResponse.model_validate(get_me(actor_email=actor))
+
+
+@router.get("/families/{family_id}/viewer-context", response_model=EducationViewerContextResponse)
+def viewer_context(
+    family_id: int,
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    _ensure_family_access_only(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    context = get_family_context(family_id=family_id, actor_email=actor)
+    persons = get_family_persons(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    return EducationViewerContextResponse(
+        family_id=family_id,
+        family_slug=str(context.get("family_slug") or ""),
+        person_id=str(context.get("person_id") or ""),
+        actor_person_id=str(context.get("actor_person_id") or context.get("person_id") or ""),
+        target_person_id=str(context.get("target_person_id") or context.get("person_id") or ""),
+        is_family_admin=bool(context.get("is_family_admin")),
+        education_enabled=_education_enabled(family_id=family_id, actor_email=actor, internal_admin=internal_admin),
+        primary_email=context.get("primary_email"),
+        directory_account_id=context.get("directory_account_id"),
+        member_id=context.get("member_id"),
+        persons=[
+            ViewerPersonResponse(
+                person_id=str(item.get("person_id")),
+                display_name=str(item.get("display_name") or item.get("canonical_name") or item.get("person_id")),
+                role_in_family=item.get("role_in_family"),
+                is_admin=bool(item.get("is_admin")),
+                status=str(item.get("status") or "active"),
+                accounts=item.get("accounts") if isinstance(item.get("accounts"), dict) else {},
+            )
+            for item in persons
+            if str(item.get("status") or "active") == "active"
+        ],
+    )
+
+
+@router.put("/families/{family_id}/education-feature", response_model=EducationFeatureResponse)
+def put_education_feature(
+    family_id: int,
+    payload: EducationFeatureUpdate,
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    _ensure_family_access_only(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    result = update_family_feature(
+        family_id=family_id,
+        feature_key="education",
+        enabled=payload.enabled,
+        config=payload.config,
+        actor_email=actor,
+        internal_admin=internal_admin,
+    )
+    return EducationFeatureResponse.model_validate(result)
+
+
+@router.get("/families/{family_id}/dashboard", response_model=FamilyDashboardResponse)
+def get_family_dashboard(
+    family_id: int,
+    db: Session = Depends(get_db),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    _ensure_scope(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    family_persons = get_family_persons(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    return FamilyDashboardResponse.model_validate(build_family_dashboard(db, family_id=family_id, family_persons=family_persons))
 
 
 @router.get("/domains", response_model=list[DomainResponse])
@@ -299,6 +416,67 @@ def get_learner(
     internal_admin = _is_internal_admin(x_internal_admin_token)
     _ensure_scope(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
     return _serialize(LearnerResponse, _learner_or_404(db, family_id=family_id, learner_id=learner_id))
+
+
+@router.patch("/learners/{learner_id}", response_model=LearnerResponse)
+def update_learner(
+    learner_id: UUID,
+    payload: LearnerUpdate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    learner = db.get(LearnerProfile, learner_id)
+    if learner is None:
+        raise_api_error(404, "learner_not_found", "learner not found", {"learner_id": str(learner_id)})
+    _ensure_scope(family_id=learner.family_id, actor_email=actor, internal_admin=internal_admin)
+    cached = consume_idempotency(
+        db,
+        family_id=learner.family_id,
+        route_key=f"PATCH:/v1/learners/{learner_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+    )
+    if cached is not None:
+        return cached
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise_api_error(400, "empty_patch", "at least one field must be provided")
+    for key, value in changes.items():
+        setattr(learner, key, value)
+    learner.updated_at = utcnow()
+    actor_type, actor_id = normalize_actor(actor, internal_admin=internal_admin)
+    event = create_event_log(
+        db,
+        family_id=learner.family_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        event_type="education.learner.updated",
+        entity_type="learner",
+        entity_id=str(learner.learner_id),
+        payload={"learner_id": str(learner.learner_id), "display_name": learner.display_name, "status": learner.status},
+        idempotency_key=x_idempotency_key,
+    )
+    response = _serialize(LearnerResponse, learner)
+    response_json = jsonable_encoder(response)
+    store_idempotency_result(
+        db,
+        family_id=learner.family_id,
+        route_key=f"PATCH:/v1/learners/{learner_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+        response_json=response_json,
+        status_code=200,
+        resource_type="learner",
+        resource_id=str(learner.learner_id),
+    )
+    db.commit()
+    try_publish_event_rows(db, event_ids=[str(event.event_id)])
+    return response_json
 
 
 @router.post("/goals", response_model=GoalResponse, status_code=201)
@@ -499,6 +677,79 @@ def list_activities(
     _ensure_scope(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
     _learner_or_404(db, family_id=family_id, learner_id=learner_id)
     return [_serialize(ActivityResponse, item) for item in recent_rows(db, LearningActivity, family_id=family_id, learner_id=learner_id, limit=limit, order_attr="occurred_at")]
+
+
+@router.patch("/activities/{activity_id}", response_model=ActivityResponse)
+def update_activity(
+    activity_id: UUID,
+    payload: ActivityUpdate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    row = _activity_or_404(db, activity_id, family_id=None)
+    assert row is not None
+    _ensure_scope(family_id=row.family_id, actor_email=actor, internal_admin=internal_admin)
+    cached = consume_idempotency(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/activities/{activity_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+    )
+    if cached is not None:
+        return cached
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise_api_error(400, "empty_patch", "at least one field must be provided")
+    previous_domain_id = row.domain_id
+    previous_skill_id = row.skill_id
+    _domain_or_404(db, changes.get("domain_id", row.domain_id))
+    _skill_or_404(db, changes.get("skill_id", row.skill_id))
+    for key, value in changes.items():
+        setattr(row, key, value)
+    refresh_snapshot_transition(
+        db,
+        family_id=row.family_id,
+        learner_id=row.learner_id,
+        previous_domain_id=previous_domain_id,
+        previous_skill_id=previous_skill_id,
+        next_domain_id=row.domain_id,
+        next_skill_id=row.skill_id,
+    )
+    actor_type, actor_id = normalize_actor(actor, internal_admin=internal_admin)
+    event = create_event_log(
+        db,
+        family_id=row.family_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        event_type="education.activity.updated",
+        entity_type="activity",
+        entity_id=str(row.activity_id),
+        payload={"activity_id": str(row.activity_id), "learner_id": str(row.learner_id), "activity_type": row.activity_type, "title": row.title},
+        idempotency_key=x_idempotency_key,
+        contains_free_text=bool(row.description),
+    )
+    response = _serialize(ActivityResponse, row)
+    response_json = jsonable_encoder(response)
+    store_idempotency_result(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/activities/{activity_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+        response_json=response_json,
+        status_code=200,
+        resource_type="activity",
+        resource_id=str(row.activity_id),
+    )
+    db.commit()
+    try_publish_event_rows(db, event_ids=[str(event.event_id)])
+    return response_json
 
 
 @router.post("/assignments", response_model=AssignmentResponse, status_code=201)
@@ -703,6 +954,82 @@ def list_assessments(
     return [_serialize(AssessmentResponse, item) for item in recent_rows(db, Assessment, family_id=family_id, learner_id=learner_id, limit=limit, order_attr="occurred_at")]
 
 
+@router.patch("/assessments/{assessment_id}", response_model=AssessmentResponse)
+def update_assessment(
+    assessment_id: UUID,
+    payload: AssessmentUpdate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    row = db.get(Assessment, assessment_id)
+    if row is None:
+        raise_api_error(404, "assessment_not_found", "assessment not found", {"assessment_id": str(assessment_id)})
+    _ensure_scope(family_id=row.family_id, actor_email=actor, internal_admin=internal_admin)
+    cached = consume_idempotency(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/assessments/{assessment_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+    )
+    if cached is not None:
+        return cached
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise_api_error(400, "empty_patch", "at least one field must be provided")
+    previous_domain_id = row.domain_id
+    previous_skill_id = row.skill_id
+    _domain_or_404(db, changes.get("domain_id", row.domain_id))
+    _skill_or_404(db, changes.get("skill_id", row.skill_id))
+    _assignment_or_404(db, changes.get("assignment_id", row.assignment_id), family_id=row.family_id)
+    _activity_or_404(db, changes.get("activity_id", row.activity_id), family_id=row.family_id)
+    for key, value in changes.items():
+        setattr(row, key, value)
+    refresh_snapshot_transition(
+        db,
+        family_id=row.family_id,
+        learner_id=row.learner_id,
+        previous_domain_id=previous_domain_id,
+        previous_skill_id=previous_skill_id,
+        next_domain_id=row.domain_id,
+        next_skill_id=row.skill_id,
+    )
+    actor_type, actor_id = normalize_actor(actor, internal_admin=internal_admin)
+    event = create_event_log(
+        db,
+        family_id=row.family_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        event_type="education.assessment.updated",
+        entity_type="assessment",
+        entity_id=str(row.assessment_id),
+        payload={"assessment_id": str(row.assessment_id), "learner_id": str(row.learner_id), "title": row.title, "percent": row.percent, "score": row.score},
+        idempotency_key=x_idempotency_key,
+        contains_free_text=bool(row.notes),
+    )
+    response = _serialize(AssessmentResponse, row)
+    response_json = jsonable_encoder(response)
+    store_idempotency_result(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/assessments/{assessment_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+        response_json=response_json,
+        status_code=200,
+        resource_type="assessment",
+        resource_id=str(row.assessment_id),
+    )
+    db.commit()
+    try_publish_event_rows(db, event_ids=[str(event.event_id)])
+    return response_json
+
+
 @router.post("/practice-repetitions", response_model=PracticeRepetitionResponse, status_code=201)
 def create_practice_repetition(
     payload: PracticeRepetitionCreate,
@@ -774,6 +1101,80 @@ def list_practice_repetitions(
     return [_serialize(PracticeRepetitionResponse, item) for item in recent_rows(db, PracticeRepetition, family_id=family_id, learner_id=learner_id, limit=limit, order_attr="occurred_at")]
 
 
+@router.patch("/practice-repetitions/{repetition_id}", response_model=PracticeRepetitionResponse)
+def update_practice_repetition(
+    repetition_id: UUID,
+    payload: PracticeRepetitionUpdate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    row = db.get(PracticeRepetition, repetition_id)
+    if row is None:
+        raise_api_error(404, "practice_repetition_not_found", "practice repetition not found", {"repetition_id": str(repetition_id)})
+    _ensure_scope(family_id=row.family_id, actor_email=actor, internal_admin=internal_admin)
+    cached = consume_idempotency(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/practice-repetitions/{repetition_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+    )
+    if cached is not None:
+        return cached
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise_api_error(400, "empty_patch", "at least one field must be provided")
+    previous_domain_id = row.domain_id
+    previous_skill_id = row.skill_id
+    _domain_or_404(db, changes.get("domain_id", row.domain_id))
+    _skill_or_404(db, changes.get("skill_id", row.skill_id))
+    for key, value in changes.items():
+        setattr(row, key, value)
+    refresh_snapshot_transition(
+        db,
+        family_id=row.family_id,
+        learner_id=row.learner_id,
+        previous_domain_id=previous_domain_id,
+        previous_skill_id=previous_skill_id,
+        next_domain_id=row.domain_id,
+        next_skill_id=row.skill_id,
+    )
+    actor_type, actor_id = normalize_actor(actor, internal_admin=internal_admin)
+    event = create_event_log(
+        db,
+        family_id=row.family_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        event_type="education.practice_repetition.updated",
+        entity_type="practice_repetition",
+        entity_id=str(row.repetition_id),
+        payload={"repetition_id": str(row.repetition_id), "learner_id": str(row.learner_id), "duration_seconds": row.duration_seconds, "performance_score": row.performance_score},
+        idempotency_key=x_idempotency_key,
+        contains_free_text=bool(row.notes),
+    )
+    response = _serialize(PracticeRepetitionResponse, row)
+    response_json = jsonable_encoder(response)
+    store_idempotency_result(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/practice-repetitions/{repetition_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+        response_json=response_json,
+        status_code=200,
+        resource_type="practice_repetition",
+        resource_id=str(row.repetition_id),
+    )
+    db.commit()
+    try_publish_event_rows(db, event_ids=[str(event.event_id)])
+    return response_json
+
+
 @router.post("/journals", response_model=JournalResponse, status_code=201)
 def create_journal(
     payload: JournalCreate,
@@ -842,6 +1243,68 @@ def list_journals(
     return [_serialize(JournalResponse, item) for item in recent_rows(db, JournalEntry, family_id=family_id, learner_id=learner_id, limit=limit, order_attr="occurred_at")]
 
 
+@router.patch("/journals/{journal_id}", response_model=JournalResponse)
+def update_journal(
+    journal_id: UUID,
+    payload: JournalUpdate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    row = db.get(JournalEntry, journal_id)
+    if row is None:
+        raise_api_error(404, "journal_not_found", "journal not found", {"journal_id": str(journal_id)})
+    _ensure_scope(family_id=row.family_id, actor_email=actor, internal_admin=internal_admin)
+    cached = consume_idempotency(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/journals/{journal_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+    )
+    if cached is not None:
+        return cached
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise_api_error(400, "empty_patch", "at least one field must be provided")
+    for key, value in changes.items():
+        setattr(row, key, value)
+    refresh_snapshot_scopes(db, family_id=row.family_id, learner_id=row.learner_id, scopes={(None, None)})
+    actor_type, actor_id = normalize_actor(actor, internal_admin=internal_admin)
+    event = create_event_log(
+        db,
+        family_id=row.family_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        event_type="education.journal.updated",
+        entity_type="journal",
+        entity_id=str(row.journal_id),
+        payload={"journal_id": str(row.journal_id), "learner_id": str(row.learner_id), "title": row.title},
+        idempotency_key=x_idempotency_key,
+        contains_free_text=True,
+    )
+    response = _serialize(JournalResponse, row)
+    response_json = jsonable_encoder(response)
+    store_idempotency_result(
+        db,
+        family_id=row.family_id,
+        route_key=f"PATCH:/v1/journals/{journal_id}",
+        idempotency_key=x_idempotency_key,
+        payload=payload,
+        response_json=response_json,
+        status_code=200,
+        resource_type="journal",
+        resource_id=str(row.journal_id),
+    )
+    db.commit()
+    try_publish_event_rows(db, event_ids=[str(event.event_id)])
+    return response_json
+
+
 @router.post("/quizzes", response_model=QuizSessionResponse, status_code=201)
 def create_quiz(
     payload: QuizCreate,
@@ -896,6 +1359,23 @@ def create_quiz(
     db.commit()
     try_publish_event_rows(db, event_ids=[str(event.event_id)])
     return response_json
+
+
+@router.get("/learners/{learner_id}/quizzes", response_model=list[QuizSessionResponse])
+def list_quizzes(
+    learner_id: UUID,
+    family_id: int = Query(..., ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+    x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
+    x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
+):
+    actor = _caller_email(x_forwarded_user, x_dev_user)
+    internal_admin = _is_internal_admin(x_internal_admin_token)
+    _ensure_scope(family_id=family_id, actor_email=actor, internal_admin=internal_admin)
+    _learner_or_404(db, family_id=family_id, learner_id=learner_id)
+    return [_serialize(QuizSessionResponse, item) for item in recent_rows(db, QuizSession, family_id=family_id, learner_id=learner_id, limit=limit)]
 
 
 @router.post("/quizzes/{quiz_id}/items", response_model=list[QuizItemResponse], status_code=201)

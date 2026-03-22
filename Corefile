@@ -10,6 +10,9 @@
     192.168.1.52 tasks.family.callender
     192.168.1.52 decision.family.callender
     192.168.1.52 events.family.callender
+    192.168.1.52 education.family.callender
+    192.168.1.52 questions.family.callender
+    192.168.1.52 profiles.family.callender
     fallthrough
     }
 

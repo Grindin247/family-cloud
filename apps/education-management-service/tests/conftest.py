@@ -63,6 +63,81 @@ def reset_db(monkeypatch):
             "canonical_name": "Learner One",
         },
     )
+    monkeypatch.setattr(
+        "app.routers.education.get_me",
+        lambda **kwargs: {
+            "authenticated": True,
+            "email": "admin@example.com",
+            "memberships": [
+                {
+                    "family_id": 2,
+                    "family_name": "Test Family",
+                    "member_id": 10,
+                    "person_id": "00000000-0000-0000-0000-000000000010",
+                    "role": "admin",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "app.routers.education.get_family_context",
+        lambda **kwargs: {
+            "family_id": kwargs["family_id"],
+            "family_slug": "test-family",
+            "person_id": "00000000-0000-0000-0000-000000000010",
+            "actor_person_id": "00000000-0000-0000-0000-000000000010",
+            "target_person_id": "00000000-0000-0000-0000-000000000010",
+            "is_family_admin": True,
+            "primary_email": "admin@example.com",
+            "directory_account_id": "dir-10",
+            "member_id": 10,
+        },
+    )
+    monkeypatch.setattr(
+        "app.routers.education.get_family_persons",
+        lambda **kwargs: [
+            {
+                "person_id": "00000000-0000-0000-0000-000000000010",
+                "display_name": "Admin Person",
+                "canonical_name": "Admin Person",
+                "role_in_family": "admin",
+                "is_admin": True,
+                "status": "active",
+                "accounts": {"email": ["admin@example.com"]},
+            },
+            {
+                "person_id": "00000000-0000-0000-0000-000000000011",
+                "display_name": "Second Learner",
+                "canonical_name": "Second Learner",
+                "role_in_family": "child",
+                "is_admin": False,
+                "status": "active",
+                "accounts": {"email": ["learner2@example.com"]},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "app.routers.education.get_family_features",
+        lambda **kwargs: [
+            {
+                "family_id": kwargs["family_id"],
+                "feature_key": "education",
+                "enabled": True,
+                "config": {},
+                "updated_at": "2026-03-21T12:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.routers.education.update_family_feature",
+        lambda **kwargs: {
+            "family_id": kwargs["family_id"],
+            "feature_key": kwargs["feature_key"],
+            "enabled": kwargs["enabled"],
+            "config": kwargs["config"],
+            "updated_at": "2026-03-21T12:00:00Z",
+        },
+    )
     monkeypatch.setattr("app.services.education.publish_family_event", lambda *args, **kwargs: "evt-1")
     yield
 

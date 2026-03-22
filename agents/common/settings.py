@@ -20,6 +20,7 @@ class AgentSettings(BaseSettings):
     # Decision system API (when using HTTP adapter instead of MCP transport)
     decision_api_base_url: str = "http://localhost:8000/v1"
     family_event_api_base_url: str = "http://localhost:8010/v1"
+    question_api_base_url: str = "http://localhost:8030/v1"
 
     # Decision agent behavior
     decision_threshold_1_to_5: float = 4.0

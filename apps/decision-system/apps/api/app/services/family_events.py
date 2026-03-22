@@ -36,7 +36,7 @@ def _json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-KNOWN_DOMAINS = ("decision", "task", "file", "note", "education")
+KNOWN_DOMAINS = ("decision", "task", "file", "note", "education", "profile")
 METADATA_TOPIC_KEYS = ("note_type", "category", "project", "bucket", "status", "score_type", "area", "goal")
 
 
@@ -273,17 +273,26 @@ def _title_and_summary(event_type: str, payload: dict[str, Any], domain: str) ->
         "note.created": ("Note created", f"Note created: {subject_name}"),
         "note.summarized": ("Note summarized", f"Note summarized: {subject_name}"),
         "education.learner.created": ("Learner created", f"Learner created: {subject_name}"),
+        "education.learner.updated": ("Learner updated", f"Learner updated: {subject_name}"),
         "education.goal.created": ("Education goal created", f"Education goal created: {subject_name}"),
         "education.goal.updated": ("Education goal updated", f"Education goal updated: {subject_name}"),
         "education.activity.recorded": ("Learning activity recorded", f"Learning activity recorded: {subject_name}"),
+        "education.activity.updated": ("Learning activity updated", f"Learning activity updated: {subject_name}"),
         "education.assignment.created": ("Assignment created", f"Assignment created: {subject_name}"),
         "education.assignment.updated": ("Assignment updated", f"Assignment updated: {subject_name}"),
         "education.assessment.recorded": ("Assessment recorded", f"Assessment recorded: {subject_name}"),
+        "education.assessment.updated": ("Assessment updated", f"Assessment updated: {subject_name}"),
         "education.practice_repetition.recorded": ("Practice repetition recorded", f"Practice repetition recorded: {subject_name}"),
+        "education.practice_repetition.updated": ("Practice repetition updated", f"Practice repetition updated: {subject_name}"),
         "education.journal.recorded": ("Journal recorded", f"Journal recorded: {subject_name}"),
+        "education.journal.updated": ("Journal updated", f"Journal updated: {subject_name}"),
         "education.quiz.created": ("Quiz created", f"Quiz created: {subject_name}"),
         "education.quiz.response_recorded": ("Quiz response recorded", f"Quiz response recorded: {subject_name}"),
         "education.attachment.linked": ("Attachment linked", f"Attachment linked: {subject_name}"),
+        "profile.person.updated": ("Profile updated", f"Profile updated: {subject_name}"),
+        "profile.relationship.created": ("Relationship created", f"Relationship created: {subject_name}"),
+        "profile.relationship.updated": ("Relationship updated", f"Relationship updated: {subject_name}"),
+        "profile.relationship.deleted": ("Relationship removed", f"Relationship removed: {subject_name}"),
     }
     return mapping.get(event_type, (event_type.replace(".", " ").title(), f"{event_type}"))
 

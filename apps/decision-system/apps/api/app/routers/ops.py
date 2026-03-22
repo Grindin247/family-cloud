@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import httpx
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -81,6 +83,56 @@ def _ensure_family_access(
     return _actor(ctx, x_dev_user)
 
 
+def _question_proxy_headers(
+    *,
+    ctx: AuthContext | None,
+    x_dev_user: str | None,
+    x_internal_admin_token: str | None,
+) -> dict[str, str]:
+    if _is_internal_admin(x_internal_admin_token) or (settings.auth_mode == "none" and ctx is None and not x_dev_user):
+        return {"X-Internal-Admin-Token": settings.question_internal_admin_token}
+    actor = _actor(ctx, x_dev_user)
+    if actor in {"system", "system-internal"}:
+        return {"X-Internal-Admin-Token": settings.question_internal_admin_token}
+    return {"X-Dev-User": actor}
+
+
+def _proxy_question_request(
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, object] | None = None,
+    json_body: dict[str, object] | None = None,
+):
+    try:
+        response = httpx.request(
+            method,
+            f"{settings.question_api_base_url.rstrip('/')}{path}",
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"question-service proxy failed: {exc}") from exc
+
+    if response.status_code == 204:
+        return None
+
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        payload = response.json()
+    else:
+        payload = response.text
+
+    if not response.is_success:
+        if isinstance(payload, dict) and "detail" in payload:
+            raise HTTPException(status_code=response.status_code, detail=payload["detail"])
+        raise HTTPException(status_code=response.status_code, detail=str(payload))
+    return payload
+
+
 @router.get("/questions", response_model=ListAgentQuestionsResponse)
 def list_agent_questions(
     family_id: int,
@@ -92,10 +144,12 @@ def list_agent_questions(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    expire_questions(db, family_id=family_id)
-    db.commit()
-    return {"items": list_questions(db, family_id=family_id, domain=domain, status=status, include_inactive=include_inactive)}
+    return _proxy_question_request(
+        "GET",
+        f"/families/{family_id}/questions",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        params={"domain": domain, "status": status, "include_inactive": include_inactive},
+    )
 
 
 @router.post("/questions", response_model=dict, status_code=201)
@@ -107,27 +161,27 @@ def create_agent_question(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    actor = _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    result = create_or_update_question(
-        db,
-        family_id=family_id,
-        domain=payload.domain,
-        source_agent=payload.source_agent,
-        topic=payload.topic,
-        summary=payload.summary,
-        prompt=payload.prompt,
-        urgency=payload.urgency,
-        topic_type=payload.topic_type,
-        actor=actor,
-        dedupe_key=payload.dedupe_key,
-        expires_at=payload.expires_at,
-        due_at=payload.due_at,
-        answer_sufficiency_state=payload.answer_sufficiency_state,
-        context=payload.context,
-        artifact_refs=payload.artifact_refs,
+    return _proxy_question_request(
+        "POST",
+        f"/families/{family_id}/questions",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        json_body={
+            "domain": payload.domain,
+            "source_agent": payload.source_agent,
+            "topic": payload.topic,
+            "summary": payload.summary,
+            "prompt": payload.prompt,
+            "urgency": payload.urgency,
+            "category": payload.topic_type,
+            "topic_type": payload.topic_type,
+            "dedupe_key": payload.dedupe_key,
+            "expires_at": payload.expires_at.isoformat() if payload.expires_at else None,
+            "due_at": payload.due_at.isoformat() if payload.due_at else None,
+            "answer_sufficiency_state": payload.answer_sufficiency_state,
+            "context": payload.context,
+            "artifact_refs": payload.artifact_refs,
+        },
     )
-    db.commit()
-    return result
 
 
 @router.patch("/questions/{question_id}", response_model=dict)
@@ -140,27 +194,25 @@ def patch_agent_question(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    actor = _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    question = get_question(db, question_id)
-    if question is None or question.family_id != family_id:
-        raise HTTPException(status_code=404, detail="agent question not found")
-    result = update_question(
-        db,
-        question=question,
-        actor=actor,
-        summary=payload.summary,
-        prompt=payload.prompt,
-        urgency=payload.urgency,
-        topic_type=payload.topic_type,
-        status=payload.status,
-        expires_at=payload.expires_at,
-        due_at=payload.due_at,
-        answer_sufficiency_state=payload.answer_sufficiency_state,
-        context_patch=payload.context_patch,
-        artifact_refs=payload.artifact_refs,
+    body = {
+        "summary": payload.summary,
+        "prompt": payload.prompt,
+        "urgency": payload.urgency,
+        "category": payload.topic_type,
+        "topic_type": payload.topic_type,
+        "status": payload.status,
+        "expires_at": payload.expires_at.isoformat() if payload.expires_at else None,
+        "due_at": payload.due_at.isoformat() if payload.due_at else None,
+        "answer_sufficiency_state": payload.answer_sufficiency_state,
+        "context_patch": payload.context_patch,
+        "artifact_refs": payload.artifact_refs,
+    }
+    return _proxy_question_request(
+        "PATCH",
+        f"/families/{family_id}/questions/{question_id}",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        json_body=body,
     )
-    db.commit()
-    return result
 
 
 @router.post("/questions/{question_id}/asked", response_model=dict)
@@ -173,19 +225,16 @@ def asked_agent_question(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    actor = _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    question = get_question(db, question_id)
-    if question is None or question.family_id != family_id:
-        raise HTTPException(status_code=404, detail="agent question not found")
-    result = mark_question_asked(
-        db,
-        question=question,
-        actor=actor,
-        delivery_agent=payload.delivery_agent,
-        delivery_context=payload.delivery_context,
+    return _proxy_question_request(
+        "POST",
+        f"/families/{family_id}/questions/{question_id}/asked",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        json_body={
+            "delivery_agent": payload.delivery_agent,
+            "delivery_channel": "discord_dm",
+            "delivery_context": payload.delivery_context,
+        },
     )
-    db.commit()
-    return result
 
 
 @router.post("/questions/{question_id}/resolve", response_model=dict)
@@ -198,21 +247,17 @@ def resolve_agent_question_route(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    actor = _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    question = get_question(db, question_id)
-    if question is None or question.family_id != family_id:
-        raise HTTPException(status_code=404, detail="agent question not found")
-    result = resolve_question(
-        db,
-        question=question,
-        actor=actor,
-        status=payload.status,
-        resolution_note=payload.resolution_note,
-        answer_sufficiency_state=payload.answer_sufficiency_state,
-        context_patch=payload.context_patch,
+    return _proxy_question_request(
+        "POST",
+        f"/families/{family_id}/questions/{question_id}/resolve",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        json_body={
+            "status": payload.status,
+            "resolution_note": payload.resolution_note,
+            "answer_sufficiency_state": payload.answer_sufficiency_state,
+            "context_patch": payload.context_patch,
+        },
     )
-    db.commit()
-    return result
 
 
 @router.get("/questions/history", response_model=list[dict])
@@ -224,8 +269,15 @@ def get_agent_question_history(
     x_dev_user: str | None = Header(default=None, alias="X-Dev-User"),
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
-    _ensure_family_access(db, family_id=family_id, ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token)
-    return list_question_history(db, family_id=family_id, question_id=question_id)
+    payload = _proxy_question_request(
+        "GET",
+        f"/families/{family_id}/questions/history",
+        headers=_question_proxy_headers(ctx=ctx, x_dev_user=x_dev_user, x_internal_admin_token=x_internal_admin_token),
+        params={"question_id": question_id},
+    )
+    if isinstance(payload, dict):
+        return payload.get("events", [])
+    return payload
 
 
 @router.post("/events", response_model=dict, status_code=201)

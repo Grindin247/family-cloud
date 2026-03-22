@@ -343,6 +343,206 @@ def refresh_snapshots(
     return rows
 
 
+def refresh_snapshot_scopes(
+    db: Session,
+    *,
+    family_id: int,
+    learner_id: UUID,
+    scopes: set[tuple[UUID | None, UUID | None]],
+) -> list[ProgressSnapshot]:
+    rows: list[ProgressSnapshot] = []
+    normalized_scopes = {(None, None), *scopes}
+    for domain_id, skill_id in normalized_scopes:
+        rows.append(upsert_snapshot(db, family_id=family_id, learner_id=learner_id, domain_id=domain_id, skill_id=skill_id))
+    return rows
+
+
+def refresh_snapshot_transition(
+    db: Session,
+    *,
+    family_id: int,
+    learner_id: UUID,
+    previous_domain_id: UUID | None,
+    previous_skill_id: UUID | None,
+    next_domain_id: UUID | None,
+    next_skill_id: UUID | None,
+) -> list[ProgressSnapshot]:
+    return refresh_snapshot_scopes(
+        db,
+        family_id=family_id,
+        learner_id=learner_id,
+        scopes={
+            (previous_domain_id, previous_skill_id),
+            (next_domain_id, next_skill_id),
+        },
+    )
+
+
+def assignment_is_open(status: str | None) -> bool:
+    return str(status or "").strip().lower() not in {"completed", "done"}
+
+
+def _assignment_focus_key(item: Assignment) -> tuple[int, datetime]:
+    due_at = as_utc(item.due_at)
+    assigned_at = as_utc(item.assigned_at)
+    created_at = as_utc(item.created_at)
+    if due_at is not None:
+        return (0, due_at)
+    if assigned_at is not None:
+        return (1, assigned_at)
+    if created_at is not None:
+        return (2, created_at)
+    return (3, datetime.max.replace(tzinfo=UTC))
+
+
+def dashboard_score_trend(
+    db: Session,
+    *,
+    family_id: int,
+    learner_id: UUID,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    rows = (
+        db.execute(
+            select(ProgressSnapshot)
+            .where(
+                ProgressSnapshot.family_id == family_id,
+                ProgressSnapshot.learner_id == learner_id,
+                ProgressSnapshot.scope_key == "all",
+            )
+            .order_by(ProgressSnapshot.as_of_date.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    rows.reverse()
+    return [
+        {
+            "as_of_date": row.as_of_date,
+            "value": row.avg_score_30d if row.avg_score_30d is not None else row.latest_score,
+        }
+        for row in rows
+    ]
+
+
+def build_family_dashboard(
+    db: Session,
+    *,
+    family_id: int,
+    family_persons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    learners = (
+        db.execute(select(LearnerProfile).where(LearnerProfile.family_id == family_id).order_by(LearnerProfile.display_name.asc()))
+        .scalars()
+        .all()
+    )
+
+    tracked_person_ids = {str(learner.learner_id) for learner in learners}
+    tracked_rows: list[dict[str, Any]] = []
+    total_active_goals = 0
+    total_open_assignments = 0
+    score_values: list[float] = []
+    total_minutes_values: list[float] = []
+
+    for learner in learners:
+        active_goals = (
+            db.execute(
+                select(LearningGoal)
+                .where(
+                    LearningGoal.family_id == family_id,
+                    LearningGoal.learner_id == learner.learner_id,
+                    LearningGoal.status == "active",
+                )
+                .order_by(LearningGoal.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        assignments = (
+            db.execute(
+                select(Assignment)
+                .where(
+                    Assignment.family_id == family_id,
+                    Assignment.learner_id == learner.learner_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        open_assignments = sorted((item for item in assignments if assignment_is_open(item.status)), key=_assignment_focus_key)
+        latest_activity = (
+            db.execute(
+                select(LearningActivity)
+                .where(
+                    LearningActivity.family_id == family_id,
+                    LearningActivity.learner_id == learner.learner_id,
+                )
+                .order_by(LearningActivity.occurred_at.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        stats = calculate_stats(db, family_id=family_id, learner_id=learner.learner_id)
+
+        current_focus_text = None
+        if open_assignments:
+            current_focus_text = open_assignments[0].title
+        elif active_goals:
+            current_focus_text = active_goals[0].title
+        elif latest_activity is not None:
+            current_focus_text = latest_activity.title
+
+        total_active_goals += len(active_goals)
+        total_open_assignments += len(open_assignments)
+        if stats["avg_score_30d"] is not None:
+            score_values.append(float(stats["avg_score_30d"]))
+        if stats["total_minutes_30d"] is not None:
+            total_minutes_values.append(float(stats["total_minutes_30d"]))
+
+        tracked_rows.append(
+            {
+                "learner": learner,
+                "current_focus_text": current_focus_text,
+                "last_activity_at": as_utc(latest_activity.occurred_at) if latest_activity is not None else None,
+                "active_goal_count": len(active_goals),
+                "open_assignment_count": len(open_assignments),
+                "avg_score_30d": stats["avg_score_30d"],
+                "latest_score": stats["latest_score"],
+                "total_minutes_30d": stats["total_minutes_30d"],
+                "days_since_last_practice": stats["days_since_last_practice"],
+                "score_trend_points": dashboard_score_trend(db, family_id=family_id, learner_id=learner.learner_id),
+            }
+        )
+
+    untracked_persons = [
+        {
+            "person_id": str(person.get("person_id") or ""),
+            "display_name": str(person.get("display_name") or person.get("canonical_name") or person.get("person_id") or "Unknown"),
+            "role_in_family": person.get("role_in_family"),
+            "is_admin": bool(person.get("is_admin")),
+            "status": str(person.get("status") or "active"),
+        }
+        for person in family_persons
+        if str(person.get("status") or "active") == "active" and str(person.get("person_id") or "") not in tracked_person_ids
+    ]
+
+    return {
+        "family_id": family_id,
+        "kpis": {
+            "tracked_learner_count": len(tracked_rows),
+            "untracked_person_count": len(untracked_persons),
+            "active_goal_count": total_active_goals,
+            "open_assignment_count": total_open_assignments,
+            "avg_score_30d": round(sum(score_values) / len(score_values), 2) if score_values else None,
+            "total_minutes_30d": round(sum(total_minutes_values), 2) if total_minutes_values else None,
+        },
+        "tracked_learners": tracked_rows,
+        "untracked_persons": untracked_persons,
+    }
+
+
 def create_event_log(
     db: Session,
     *,

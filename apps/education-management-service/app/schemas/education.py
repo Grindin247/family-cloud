@@ -31,6 +31,13 @@ class LearnerResponse(OrmResponse):
     updated_at: datetime
 
 
+class LearnerUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    birthdate: date | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(default=None, min_length=1, max_length=32)
+
+
 class DomainResponse(OrmResponse):
     domain_id: UUID
     code: str
@@ -124,6 +131,18 @@ class ActivityResponse(OrmResponse):
     created_at: datetime
 
 
+class ActivityUpdate(BaseModel):
+    domain_id: UUID | None = None
+    skill_id: UUID | None = None
+    activity_type: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    occurred_at: datetime | None = None
+    duration_seconds: int | None = Field(default=None, ge=0)
+    source_ref: str | None = Field(default=None, max_length=255)
+    source_session_id: str | None = Field(default=None, max_length=255)
+
+
 class AssignmentCreate(BaseModel):
     family_id: int = Field(ge=1)
     learner_id: UUID
@@ -215,6 +234,23 @@ class AssessmentResponse(OrmResponse):
     created_at: datetime
 
 
+class AssessmentUpdate(BaseModel):
+    domain_id: UUID | None = None
+    skill_id: UUID | None = None
+    assignment_id: UUID | None = None
+    activity_id: UUID | None = None
+    assessment_type: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    occurred_at: datetime | None = None
+    score: float | None = None
+    max_score: float | None = None
+    percent: float | None = None
+    confidence_self_report: float | None = None
+    rubric_json: dict[str, Any] | None = None
+    graded_by: str | None = Field(default=None, max_length=255)
+    notes: str | None = None
+
+
 class PracticeRepetitionCreate(BaseModel):
     family_id: int = Field(ge=1)
     learner_id: UUID
@@ -247,6 +283,19 @@ class PracticeRepetitionResponse(OrmResponse):
     created_at: datetime
 
 
+class PracticeRepetitionUpdate(BaseModel):
+    domain_id: UUID | None = None
+    skill_id: UUID | None = None
+    topic_text: str | None = None
+    occurred_at: datetime | None = None
+    duration_seconds: int | None = Field(default=None, ge=0)
+    attempt_number: int | None = Field(default=None, ge=1)
+    performance_score: float | None = None
+    difficulty_self_report: float | None = None
+    confidence_self_report: float | None = None
+    notes: str | None = None
+
+
 class JournalCreate(BaseModel):
     family_id: int = Field(ge=1)
     learner_id: UUID
@@ -267,6 +316,14 @@ class JournalResponse(OrmResponse):
     mood_self_report: str | None = None
     effort_self_report: float | None = None
     created_at: datetime
+
+
+class JournalUpdate(BaseModel):
+    occurred_at: datetime | None = None
+    title: str | None = Field(default=None, max_length=255)
+    content: str | None = Field(default=None, min_length=1)
+    mood_self_report: str | None = Field(default=None, max_length=64)
+    effort_self_report: float | None = None
 
 
 class QuizCreate(BaseModel):
@@ -444,3 +501,95 @@ class EducationSummaryResponse(BaseModel):
     recent_quiz_sessions: list[QuizSessionResponse] = Field(default_factory=list)
     latest_snapshots: list[ProgressSnapshotResponse] = Field(default_factory=list)
     stats: StatsResponse
+
+
+class EducationViewerMembershipResponse(BaseModel):
+    family_id: int
+    family_name: str
+    member_id: int
+    person_id: str | None = None
+    role: str
+
+
+class EducationViewerMeResponse(BaseModel):
+    authenticated: bool
+    email: str | None = None
+    memberships: list[EducationViewerMembershipResponse] = Field(default_factory=list)
+
+
+class ViewerPersonResponse(BaseModel):
+    person_id: str
+    display_name: str
+    role_in_family: str | None = None
+    is_admin: bool
+    status: str
+    accounts: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class EducationViewerContextResponse(BaseModel):
+    family_id: int
+    family_slug: str
+    person_id: str
+    actor_person_id: str
+    target_person_id: str
+    is_family_admin: bool
+    education_enabled: bool
+    primary_email: str | None = None
+    directory_account_id: str | None = None
+    member_id: int | None = None
+    persons: list[ViewerPersonResponse] = Field(default_factory=list)
+
+
+class EducationFeatureUpdate(BaseModel):
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class EducationFeatureResponse(BaseModel):
+    family_id: int
+    feature_key: str
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
+class DashboardTrendPointResponse(BaseModel):
+    as_of_date: date
+    value: float | None = None
+
+
+class LearnerDashboardRowResponse(BaseModel):
+    learner: LearnerResponse
+    current_focus_text: str | None = None
+    last_activity_at: datetime | None = None
+    active_goal_count: int
+    open_assignment_count: int
+    avg_score_30d: float | None = None
+    latest_score: float | None = None
+    total_minutes_30d: float | None = None
+    days_since_last_practice: int | None = None
+    score_trend_points: list[DashboardTrendPointResponse] = Field(default_factory=list)
+
+
+class FamilyDashboardKpisResponse(BaseModel):
+    tracked_learner_count: int
+    untracked_person_count: int
+    active_goal_count: int
+    open_assignment_count: int
+    avg_score_30d: float | None = None
+    total_minutes_30d: float | None = None
+
+
+class UntrackedPersonResponse(BaseModel):
+    person_id: str
+    display_name: str
+    role_in_family: str | None = None
+    is_admin: bool
+    status: str
+
+
+class FamilyDashboardResponse(BaseModel):
+    family_id: int
+    kpis: FamilyDashboardKpisResponse
+    tracked_learners: list[LearnerDashboardRowResponse] = Field(default_factory=list)
+    untracked_persons: list[UntrackedPersonResponse] = Field(default_factory=list)

@@ -91,6 +91,45 @@ http:
       service: events
       tls: {}
 
+    education-http:
+      rule: "Host(`education.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: education
+
+    education:
+      rule: "Host(`education.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: education
+      tls: {}
+
+    questions-http:
+      rule: "Host(`questions.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: questions
+
+    questions:
+      rule: "Host(`questions.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: questions
+      tls: {}
+
+    profiles-http:
+      rule: "Host(`profiles.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: profiles
+
+    profiles:
+      rule: "Host(`profiles.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: profiles
+      tls: {}
+
     # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
     tasks-api-http:
       rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
@@ -164,6 +203,21 @@ http:
       loadBalancer:
         servers:
           - url: "http://family-event-nginx:80"
+
+    education:
+      loadBalancer:
+        servers:
+          - url: "http://education-nginx:80"
+
+    questions:
+      loadBalancer:
+        servers:
+          - url: "http://question-nginx:80"
+
+    profiles:
+      loadBalancer:
+        servers:
+          - url: "http://profile-nginx:80"
 
   serversTransports:
     insecure-transport:

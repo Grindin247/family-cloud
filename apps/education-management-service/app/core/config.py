@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     decision_api_base_url: str = "http://decision-api:8000/v1"
     decision_api_timeout_seconds: float = 20.0
+    question_api_base_url: str = "http://question-api:8000/v1"
+    question_internal_admin_token: str = "change-me"
+    education_question_practice_gap_days: int = 7
+    education_question_journal_gap_days: int = 7
+    education_question_low_mastery_threshold: float = 70.0
 
     nats_url: str = "nats://nats:4222"
     nats_event_stream: str = "FAMILY_EVENTS"

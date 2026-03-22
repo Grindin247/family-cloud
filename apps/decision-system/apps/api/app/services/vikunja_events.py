@@ -109,6 +109,17 @@ def _task_candidate_score(candidate: dict[str, Any], path: str) -> int:
 
 
 def extract_actor_id(payload: dict[str, Any]) -> str:
+    direct_candidates: list[dict[str, Any]] = [payload]
+    for key in ("data", "event_data", "details", "context", "task", "entity"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            direct_candidates.append(value)
+
+    for candidate in direct_candidates:
+        actor_id = _extract_actor_identifier(candidate, keys=("doer", "user", "actor"))
+        if actor_id:
+            return actor_id
+
     queue: list[dict[str, Any]] = [payload]
     seen: set[int] = set()
     while queue:
@@ -117,18 +128,47 @@ def extract_actor_id(payload: dict[str, Any]) -> str:
         if marker in seen:
             continue
         seen.add(marker)
-        for key in ("doer", "user", "actor", "updated_by", "created_by"):
-            value = candidate.get(key)
-            if not isinstance(value, dict):
-                continue
-            for field in ("email", "username", "name", "id"):
-                raw = value.get(field)
-                if raw is not None and str(raw).strip():
-                    return str(raw).strip().lower()
+        actor_id = _extract_actor_identifier(candidate, keys=("doer", "user", "actor"))
+        if actor_id:
+            return actor_id
+        for value in candidate.values():
+            if isinstance(value, dict):
+                queue.append(value)
+
+    queue = [payload]
+    seen.clear()
+    while queue:
+        candidate = queue.pop(0)
+        marker = id(candidate)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        actor_id = _extract_actor_identifier(candidate, keys=("updated_by", "created_by"))
+        if actor_id:
+            return actor_id
         for value in candidate.values():
             if isinstance(value, dict):
                 queue.append(value)
     return "vikunja-system"
+
+
+def _extract_actor_identifier(candidate: dict[str, Any], *, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = candidate.get(key)
+        if not isinstance(value, dict):
+            continue
+        for field in ("email", "name", "username", "id"):
+            raw = value.get(field)
+            if raw is not None and str(raw).strip():
+                return _normalize_actor_value(field=field, raw=raw)
+    return None
+
+
+def _normalize_actor_value(*, field: str, raw: Any) -> str:
+    value = str(raw).strip()
+    if field == "name":
+        return value
+    return value.lower()
 
 
 def canonical_task_event_type(*, vikunja_event_name: str, task: dict[str, Any]) -> str | None:

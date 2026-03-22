@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+
+
+NOISE_TASK_RE = re.compile(r"\b(test|dummy|placeholder|sample|do not use|system task|smoke test)\b", re.IGNORECASE)
 
 
 def latest_task_health_snapshot(*, now: datetime | None = None) -> dict[str, Any]:
@@ -33,6 +37,8 @@ def latest_task_health_snapshot(*, now: datetime | None = None) -> dict[str, Any
         project_overdue = 0
         project_stale = 0
         for task in tasks:
+            if _is_noise_task(task, project):
+                continue
             done = bool(task.get("done"))
             due_date = _parse_dt(task.get("due_date"))
             updated_at = _parse_dt(task.get("updated") or task.get("updated_at") or task.get("created"))
@@ -120,7 +126,7 @@ def latest_task_health_snapshot(*, now: datetime | None = None) -> dict[str, Any
                     "topic": f"Task load high: {actor}",
                     "artifact_refs": [],
                     "context": {"actor_id": actor, "open_tasks": counts["open"], "overdue_tasks": counts["overdue"]},
-                    "dedupe_key": f"task_overload:{actor}:{counts['open']}",
+                    "dedupe_key": f"task_overload:{actor}",
                 }
             )
     for item in project_load:
@@ -133,7 +139,7 @@ def latest_task_health_snapshot(*, now: datetime | None = None) -> dict[str, Any
                     "topic": f"At-risk project: {item['project_name']}",
                     "artifact_refs": [{"type": "project", "id": item["project_id"]}],
                     "context": item,
-                    "dedupe_key": f"task_project_risk:{item['project_id']}:{item['overdue_tasks']}",
+                    "dedupe_key": f"task_project_risk:{item['project_id']}",
                 }
             )
 
@@ -256,12 +262,25 @@ def _looks_blocked(task: dict[str, Any]) -> bool:
     return any(token in haystack for token in ("blocked", "waiting on", "pending approval", "stuck"))
 
 
+def _is_noise_task(task: dict[str, Any], project: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        [
+            str(project.get("title") or ""),
+            str(task.get("title") or ""),
+            str(task.get("description") or ""),
+        ]
+    )
+    return bool(NOISE_TASK_RE.search(haystack))
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
+        return None
+    if dt.year < 1970:
         return None
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)

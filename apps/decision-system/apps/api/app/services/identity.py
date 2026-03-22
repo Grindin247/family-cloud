@@ -20,6 +20,7 @@ DEFAULT_FEATURES = {
     "tasks": True,
     "files": True,
     "events": True,
+    "profile": False,
     "health": False,
     "education": False,
     "finance": False,
@@ -250,6 +251,7 @@ def ensure_family_feature_defaults(db: Session, family_id: int) -> None:
         if isinstance(row, FamilyFeature) and row.family_id == family_id
     }
     now = datetime.now(timezone.utc)
+    created = False
     for feature_key, enabled in DEFAULT_FEATURES.items():
         if feature_key in existing or feature_key in pending_keys:
             continue
@@ -263,6 +265,9 @@ def ensure_family_feature_defaults(db: Session, family_id: int) -> None:
                 updated_at=now,
             )
         )
+        created = True
+    if created:
+        db.flush()
         pending_keys.add(feature_key)
 
 

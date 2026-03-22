@@ -940,10 +940,11 @@ def _create_file_question(
     reason: str,
     nextcloud_url: str,
 ) -> None:
+    question_api_base_url = os.environ.get("QUESTION_API_BASE_URL", decision_api_base_url).rstrip("/")
     try:
-        with httpx.Client(timeout=20.0, verify=_verify_for_url(decision_api_base_url)) as client:
+        with httpx.Client(timeout=20.0, verify=_verify_for_url(question_api_base_url)) as client:
             client.post(
-                f"{decision_api_base_url.rstrip('/')}/family/{family_id}/ops/questions",
+                f"{question_api_base_url}/families/{family_id}/questions",
                 headers=_http_headers(actor),
                 json={
                     "domain": "file",
@@ -955,6 +956,7 @@ def _create_file_question(
                         f"({confidence:.2f}). Reason: {reason}. Please confirm the final destination."
                     ),
                     "urgency": "medium",
+                    "category": "filing_review",
                     "topic_type": "filing_review",
                     "answer_sufficiency_state": "needed",
                     "dedupe_key": f"file-filing-review:{destination_path}",
@@ -965,6 +967,48 @@ def _create_file_question(
                         "confidence": confidence,
                         "reason": reason,
                         "nextcloud_url": nextcloud_url,
+                    },
+                    "artifact_refs": [{"type": "file", "path": destination_path}],
+                },
+            ).raise_for_status()
+    except Exception:
+        return
+
+
+def _create_file_open_questions(
+    *,
+    decision_api_base_url: str,
+    actor: str,
+    family_id: int,
+    destination_path: str,
+    title: str,
+    open_questions: list[str],
+    nextcloud_url: str,
+) -> None:
+    if not open_questions:
+        return
+    question_api_base_url = os.environ.get("QUESTION_API_BASE_URL", decision_api_base_url).rstrip("/")
+    prompt = " ".join(f"{index + 1}. {item}" for index, item in enumerate(open_questions[:3]))
+    try:
+        with httpx.Client(timeout=20.0, verify=_verify_for_url(question_api_base_url)) as client:
+            client.post(
+                f"{question_api_base_url}/families/{family_id}/questions",
+                headers=_http_headers(actor),
+                json={
+                    "domain": "file",
+                    "source_agent": "FileAgent",
+                    "topic": f"Follow-up for filed note: {title}",
+                    "summary": "FileAgent found unresolved follow-up questions in a filed note.",
+                    "prompt": prompt,
+                    "urgency": "medium",
+                    "category": "file_followup",
+                    "topic_type": "file_followup",
+                    "answer_sufficiency_state": "needed",
+                    "dedupe_key": f"file-followup:{destination_path}",
+                    "context": {
+                        "destination_path": destination_path,
+                        "nextcloud_url": nextcloud_url,
+                        "open_questions": open_questions[:5],
                     },
                     "artifact_refs": [{"type": "file", "path": destination_path}],
                 },
@@ -1028,6 +1072,7 @@ async def process_inbox_async(
             rewritten_content: str | None = None
             summary_text: str | None = None
             key_insights: list[str] = []
+            open_questions: list[str] = []
             if readable_text and infer_file_item_type(content_type, _split_name(candidate.name)[1], readable_text) in {"note", "document"}:
                 try:
                     ai_decision = synthesize_note_with_file_agent(
@@ -1050,6 +1095,7 @@ async def process_inbox_async(
                     rewritten_content = ai_decision.rewritten_markdown
                     summary_text = ai_decision.summary
                     key_insights = ai_decision.key_insights
+                    open_questions = ai_decision.open_questions
                 except Exception as exc:
                     logger.warning("file_agent_note_synthesis_failed path=%s error=%s", candidate.path, exc)
                     fallback_title = _extract_title(readable_text, _split_name(candidate.name)[0] or "captured-note")
@@ -1103,6 +1149,16 @@ async def process_inbox_async(
                     title=str(decision["title"]),
                     confidence=float(decision["confidence"]),
                     reason=str(decision["reason"]),
+                    nextcloud_url=nextcloud_url,
+                )
+            elif open_questions:
+                _create_file_open_questions(
+                    decision_api_base_url=decision_api_base_url,
+                    actor=actor,
+                    family_id=family_id,
+                    destination_path=destination,
+                    title=str(decision["title"]),
+                    open_questions=open_questions,
                     nextcloud_url=nextcloud_url,
                 )
             result = ProcessingResult(
