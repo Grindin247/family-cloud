@@ -6,20 +6,21 @@ import os
 
 from nats.aio.client import Client as NATS
 from nats.js.api import ConsumerConfig, StreamConfig
-from nats.js.errors import APIError, NotFoundError
+from nats.js.errors import NotFoundError
 
+from agents.common.family_events import canonical_subjects
 from agents.common.settings import settings as common_settings
 from app.core.db import SessionLocal
-from app.services.family_events import ingest_or_dead_letter_family_event
+from app.services.family_events import ingest_or_dead_letter_family_event, repair_event_store_sequences
 
 
 LOGGER = logging.getLogger("family_events_worker")
 STREAM_NAME = os.environ.get("FAMILY_EVENT_STREAM_NAME", common_settings.nats_event_stream)
-SUBJECTS = ["family.events.decision", "family.events.task", "family.events.file", "family.events.education"]
+SUBJECTS = canonical_subjects()
 
 
 async def _ensure_stream(js) -> None:
-    desired_subjects = ["family.>", "decision.>", "roadmap.>", "agent.>", "family.events.>"]
+    desired_subjects = ["family.>", "decision.>", "roadmap.>", "agent.>"]
     cfg = StreamConfig(
         name=STREAM_NAME,
         subjects=desired_subjects,
@@ -35,19 +36,7 @@ async def _ensure_stream(js) -> None:
     existing_subjects = list(info.config.subjects or [])
     if set(existing_subjects) == set(desired_subjects):
         return
-    merged_subjects = list(dict.fromkeys([*existing_subjects, *desired_subjects]))
-    current_cfg = info.config.as_dict()
-    current_cfg["subjects"] = merged_subjects
-    try:
-        await js.update_stream(StreamConfig(**current_cfg))
-    except APIError as exc:
-        LOGGER.warning(
-            "family_events_stream_update_skipped stream=%s existing_subjects=%s desired_subjects=%s error=%s",
-            STREAM_NAME,
-            ",".join(existing_subjects),
-            ",".join(merged_subjects),
-            exc,
-        )
+    await js.update_stream(cfg)
 
 
 async def _process_message(msg) -> None:
@@ -92,6 +81,12 @@ async def main() -> None:
     await nc.connect(servers=[common_settings.nats_url])
     js = nc.jetstream()
     await _ensure_stream(js)
+    db = SessionLocal()
+    try:
+        repair_event_store_sequences(db)
+        db.commit()
+    finally:
+        db.close()
     LOGGER.info("family_events_worker_started stream=%s subjects=%s", STREAM_NAME, ",".join(SUBJECTS))
     try:
         await asyncio.gather(*(_consume_subject(js, subject) for subject in SUBJECTS))

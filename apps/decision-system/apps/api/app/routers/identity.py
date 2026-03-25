@@ -17,6 +17,7 @@ from app.schemas.identity import (
     SenderResolutionResponse,
 )
 from app.services.access import require_family, require_family_admin, require_family_member
+from app.services.family_events import make_backend_event_payload
 from app.services.identity import (
     build_person_response,
     feature_enabled,
@@ -26,6 +27,7 @@ from app.services.identity import (
     resolve_context,
 )
 from app.models.identity import FamilyFeature
+from agents.common.family_events import diff_field_paths, make_privacy, publish_event as publish_family_event
 
 router = APIRouter(prefix="/v1", tags=["identity"])
 
@@ -36,6 +38,24 @@ def _actor_email(ctx: AuthContext | None, x_dev_user: str | None) -> str | None:
     if x_dev_user:
         return x_dev_user.strip().lower()
     return None
+
+
+def _emit_family_feature_event(*, family_id: int, actor_id: str, feature_key: str, payload: dict) -> None:
+    event = make_backend_event_payload(
+        family_id=family_id,
+        domain="family",
+        event_type="family_feature.updated",
+        actor_id=actor_id,
+        actor_type="system" if actor_id == "system" else "user",
+        subject_id=f"{family_id}:{feature_key}",
+        subject_type="family_feature",
+        payload=payload,
+        source_agent_id="FamilyService",
+        source_runtime="backend",
+        tags=["family", "feature", feature_key],
+        privacy=make_privacy(),
+    )
+    publish_family_event(event)
 
 
 @router.get("/families/{family_id}/persons", response_model=PersonListResponse)
@@ -166,6 +186,7 @@ def update_feature(
     if ctx is not None:
         require_family_admin(db, family_id, ctx.email)
     row = db.query(FamilyFeature).filter(FamilyFeature.family_id == family_id, FamilyFeature.feature_key == feature_key).one_or_none()
+    before_state = {"enabled": row.enabled, "config": row.config_jsonb or {}} if row is not None else {"enabled": None, "config": None}
     if row is None:
         row = FamilyFeature(family_id=family_id, feature_key=feature_key, enabled=payload.enabled, config_jsonb=payload.config)
         db.add(row)
@@ -174,4 +195,20 @@ def update_feature(
         row.config_jsonb = payload.config
     db.commit()
     db.refresh(row)
+    try:
+        _emit_family_feature_event(
+            family_id=family_id,
+            actor_id=ctx.email if ctx is not None else "system",
+            feature_key=feature_key,
+            payload={
+                "title": f"{feature_key} feature updated",
+                "feature_key": feature_key,
+                "enabled": row.enabled,
+                "config_keys": sorted(str(key) for key in (row.config_jsonb or {})),
+                "config_summary": {"key_count": len(row.config_jsonb or {}), "has_config": bool(row.config_jsonb or {})},
+                "changed_fields": diff_field_paths(before_state, {"enabled": row.enabled, "config": row.config_jsonb or {}}),
+            },
+        )
+    except Exception:
+        pass
     return FamilyFeatureResponse(family_id=family_id, feature_key=feature_key, enabled=row.enabled, config=row.config_jsonb or {}, updated_at=row.updated_at)

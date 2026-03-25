@@ -2,7 +2,7 @@ def _headers():
     return {"X-Dev-User": "admin@example.com"}
 
 
-def test_profile_crud_and_relationship_flow(client):
+def test_profile_crud_and_relationship_flow(client, reset_db):
     viewer = client.get("/v1/me", headers=_headers())
     assert viewer.status_code == 200
     assert viewer.json()["email"] == "admin@example.com"
@@ -139,6 +139,21 @@ def test_profile_crud_and_relationship_flow(client):
     )
     assert relationships.status_code == 200
     assert relationships.json()["items"] == []
+
+    event_types = [event["event_type"] for event in reset_db["published_events"]]
+    assert event_types == [
+        "profile.person.updated",
+        "profile.relationship.created",
+        "profile.relationship.updated",
+        "profile.relationship.deleted",
+    ]
+    profile_event = reset_db["published_events"][0]
+    assert "security_notes" not in profile_event["payload"]
+    assert profile_event["payload"]["security_notes_snippet"] == "Reviewed this week."
+    assert "person_profile.role_tags" in profile_event["payload"]["changed_fields"]
+    relationship_event = reset_db["published_events"][2]
+    assert "relationship_notes" not in relationship_event["payload"]
+    assert relationship_event["payload"]["relationship_notes_snippet"] == "Pickup backup"
 
 
 def test_profile_feature_context_and_toggle(client, monkeypatch):

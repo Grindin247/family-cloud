@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections import defaultdict
@@ -11,6 +12,14 @@ from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from agents.common.family_events import (
+    build_event,
+    diff_field_paths,
+    make_privacy,
+    new_correlation_id,
+    publish_event as publish_family_event,
+    snippet_fields,
+)
 from app.core.config import settings
 from app.models.questions import QuestionDeliveryAttempt, QuestionEngagementWindow, QuestionEvent, QuestionRecord
 
@@ -19,6 +28,15 @@ CLAIMABLE_QUESTION_STATUSES = {"pending", "answered_partial"}
 QUESTION_NOISE_RE = re.compile(r"\b(test|dummy|placeholder|sample|do not use|ignore me|smoke test|system task)\b", re.IGNORECASE)
 TASK_AUTO_AGENTS = {"TaskAgent", "TasksAgent"}
 URGENCY_PRIORITY = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+QUESTION_SUBJECT_PERSON_KEYS = (
+    "subject_person_id",
+    "target_person_id",
+    "owner_person_id",
+    "person_id",
+    "actor_person_id",
+)
+
+logger = logging.getLogger("family_cloud.question_service")
 
 
 def _utcnow() -> datetime:
@@ -53,6 +71,217 @@ def _question_context(question: QuestionRecord) -> dict[str, Any]:
 def _artifact_refs(question: QuestionRecord) -> list[dict[str, Any]]:
     refs = list(question.artifact_refs_json or [])
     return [item for item in refs if isinstance(item, dict)]
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).isoformat()
+    return value.astimezone(UTC).isoformat()
+
+
+def _nonempty_dict(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item is not None}
+
+
+def _question_subject_person_id(question: QuestionRecord) -> str | None:
+    context = _question_context(question)
+    for key in QUESTION_SUBJECT_PERSON_KEYS:
+        value = context.get(key)
+        if value not in (None, ""):
+            return str(value)
+    person_ids = context.get("person_ids")
+    if isinstance(person_ids, list):
+        for value in person_ids:
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _question_state(question: QuestionRecord) -> dict[str, Any]:
+    return {
+        "domain": question.domain,
+        "source_agent": question.source_agent,
+        "topic": question.topic,
+        "category": question.category,
+        "summary": question.summary,
+        "prompt": question.prompt,
+        "urgency": question.urgency,
+        "status": question.status,
+        "expires_at": _isoformat(question.expires_at),
+        "due_at": _isoformat(question.due_at),
+        "last_asked_at": _isoformat(question.last_asked_at),
+        "answered_at": _isoformat(question.answered_at),
+        "answer_text": question.answer_text,
+        "answer_sufficiency_state": question.answer_sufficiency_state,
+        "asked_count": int(question.asked_count or 0),
+        "last_delivery_channel": question.last_delivery_channel,
+        "last_delivery_agent": question.last_delivery_agent,
+        "context": _question_context(question),
+        "artifact_refs": _artifact_refs(question),
+        "dedupe_key": question.dedupe_key,
+    }
+
+
+def _question_delivery_summary(
+    question: QuestionRecord,
+    *,
+    attempt: QuestionDeliveryAttempt | None = None,
+) -> dict[str, Any]:
+    delivery = {
+        "delivery_agent": attempt.agent_id if attempt is not None else question.last_delivery_agent,
+        "delivery_channel": attempt.channel if attempt is not None else question.last_delivery_channel,
+        "sent_at": _isoformat(attempt.sent_at) if attempt is not None else _isoformat(question.last_asked_at),
+        "responded_at": _isoformat(attempt.responded_at) if attempt is not None else _isoformat(question.answered_at),
+        "outcome": attempt.outcome if attempt is not None else None,
+    }
+    if attempt is not None and attempt.claim_token:
+        delivery["claim_token"] = attempt.claim_token
+    if attempt is not None and isinstance(attempt.payload_json, dict) and attempt.payload_json:
+        delivery["delivery_context_keys"] = sorted(str(key) for key in attempt.payload_json)
+    return _nonempty_dict(delivery)
+
+
+def _question_event_payload(
+    question: QuestionRecord,
+    *,
+    changed_fields: list[str] | None = None,
+    resolution_note: str | None = None,
+    attempt: QuestionDeliveryAttempt | None = None,
+    extra_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = _question_context(question)
+    payload: dict[str, Any] = {
+        "question_id": question.id,
+        "origin_domain": question.domain,
+        "source_agent": question.source_agent,
+        "category": question.category,
+        "urgency": question.urgency,
+        "status": question.status,
+        "answer_sufficiency_state": question.answer_sufficiency_state,
+        "asked_count": int(question.asked_count or 0),
+        "due_at": _isoformat(question.due_at),
+        "expires_at": _isoformat(question.expires_at),
+        "last_asked_at": _isoformat(question.last_asked_at),
+        "answered_at": _isoformat(question.answered_at),
+        "dedupe_key": question.dedupe_key,
+        "artifact_refs": _artifact_refs(question),
+        "context_keys": sorted(str(key) for key in context),
+    }
+    payload.update(snippet_fields("topic", question.topic))
+    payload.update(snippet_fields("summary", question.summary))
+    payload.update(snippet_fields("prompt", question.prompt))
+    payload.update(snippet_fields("answer_text", question.answer_text))
+    payload.update(snippet_fields("resolution_note", resolution_note))
+    payload["title"] = payload.get("topic_snippet") or payload.get("summary_snippet") or f"Question {question.id}"
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    delivery = _question_delivery_summary(question, attempt=attempt)
+    if delivery:
+        payload["delivery"] = delivery
+    if question.current_claim_token and question.current_claim_expires_at:
+        payload["claim"] = _nonempty_dict(
+            {
+                "claim_token": question.current_claim_token,
+                "claim_agent": question.current_claim_agent,
+                "claim_channel": question.current_claim_channel,
+                "claimed_at": _isoformat(question.current_claimed_at),
+                "expires_at": _isoformat(question.current_claim_expires_at),
+            }
+        )
+    if extra_payload:
+        payload.update({key: value for key, value in extra_payload.items() if value is not None})
+    return payload
+
+
+def _publish_question_event(
+    *,
+    question: QuestionRecord,
+    actor: str,
+    event_type: str,
+    payload: dict[str, Any],
+    correlation_id: str | None = None,
+    source_channel: str | None = None,
+    occurred_at: datetime | None = None,
+) -> None:
+    try:
+        subject_person_id = _question_subject_person_id(question)
+        event = build_event(
+            family_id=question.family_id,
+            domain="question",
+            event_type=event_type,
+            actor={
+                "actor_type": "system" if actor.startswith("system") else "user",
+                "actor_id": actor,
+            },
+            subject={
+                "subject_type": "question",
+                "subject_id": question.id,
+                "person_id": subject_person_id,
+            },
+            payload=payload,
+            source={
+                "agent_id": "QuestionService",
+                "runtime": "backend",
+                "channel": source_channel,
+            },
+            privacy=make_privacy(
+                contains_pii=True,
+                contains_child_data=bool(subject_person_id),
+                contains_free_text=any(
+                    field in payload
+                    for field in (
+                        "topic_snippet",
+                        "summary_snippet",
+                        "prompt_snippet",
+                        "answer_text_snippet",
+                        "resolution_note_snippet",
+                    )
+                ),
+            ),
+            tags=["question", question.domain, question.category, question.status],
+            correlation_id=correlation_id,
+            occurred_at=occurred_at or _utcnow(),
+        )
+        publish_family_event(event)
+    except Exception:
+        logger.exception("Failed to publish canonical question event question_id=%s event_type=%s", question.id, event_type)
+
+
+def _publish_question_summary_event(
+    *,
+    family_id: int,
+    actor: str,
+    event_type: str,
+    subject_id: str,
+    payload: dict[str, Any],
+    correlation_id: str | None = None,
+    source_channel: str | None = None,
+) -> None:
+    try:
+        event = build_event(
+            family_id=family_id,
+            domain="question",
+            event_type=event_type,
+            actor={
+                "actor_type": "system" if actor.startswith("system") else "user",
+                "actor_id": actor,
+            },
+            subject={"subject_type": "question", "subject_id": subject_id},
+            payload=payload,
+            source={
+                "agent_id": "QuestionService",
+                "runtime": "backend",
+                "channel": source_channel,
+            },
+            privacy=make_privacy(contains_pii=False, contains_free_text=False),
+            tags=["question", "summary"],
+            correlation_id=correlation_id,
+        )
+        publish_family_event(event)
+    except Exception:
+        logger.exception("Failed to publish canonical question summary event family_id=%s event_type=%s", family_id, event_type)
 
 
 def _claim_payload(question: QuestionRecord) -> dict[str, Any] | None:
@@ -206,6 +435,7 @@ def _dismiss_superseded_questions(
     *,
     question: QuestionRecord,
     actor: str,
+    correlation_id: str | None = None,
 ) -> None:
     ref_type, ref_value = _artifact_identity(_artifact_refs(question))
     if not ref_type or not ref_value:
@@ -237,6 +467,19 @@ def _dismiss_superseded_questions(
             actor=actor,
             event_type="dismissed",
             payload={"reason": "superseded_by_newer_question", "replacement_question_id": question.id},
+        )
+        _publish_question_event(
+            question=candidate,
+            actor=actor,
+            event_type="question.dismissed",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                candidate,
+                extra_payload={
+                    "dismissal_reason": "superseded_by_newer_question",
+                    "replacement_question_id": question.id,
+                },
+            ),
         )
 
 
@@ -287,9 +530,11 @@ def create_or_update_question(
         )
     ).scalar_one_or_none()
 
+    correlation_id = new_correlation_id()
     created = False
     payload_context = context or {}
     payload_refs = [item for item in (artifact_refs or []) if isinstance(item, dict)]
+    before_state: dict[str, Any] | None = None
 
     if question is None:
         question = QuestionRecord(
@@ -316,6 +561,7 @@ def create_or_update_question(
         db.flush()
         created = True
     else:
+        before_state = _question_state(question)
         current_context = _question_context(question)
         current_context.update(payload_context)
         question.source_agent = source_agent
@@ -334,14 +580,46 @@ def create_or_update_question(
             question.status = "pending"
         db.flush()
 
-    _dismiss_superseded_questions(db, question=question, actor=actor)
+    _dismiss_superseded_questions(db, question=question, actor=actor, correlation_id=correlation_id)
+    changed_fields = diff_field_paths(before_state, _question_state(question)) if before_state is not None else [
+        "domain",
+        "source_agent",
+        "topic",
+        "category",
+        "summary",
+        "prompt",
+        "urgency",
+        "status",
+        "expires_at",
+        "due_at",
+        "answer_sufficiency_state",
+        "context",
+        "artifact_refs",
+        "dedupe_key",
+    ]
     event = append_question_event(
         db,
         question_id=question.id,
         family_id=family_id,
         actor=actor,
         event_type="created" if created else "updated",
-        payload={"topic": normalized_topic, "urgency": urgency, "category": normalized_category},
+        payload={
+            "topic": normalized_topic,
+            "urgency": urgency,
+            "category": normalized_category,
+            "changed_fields": changed_fields,
+        },
+    )
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type="question.created" if created else "question.updated",
+        correlation_id=correlation_id,
+        payload=_question_event_payload(
+            question,
+            changed_fields=changed_fields,
+            extra_payload={"event_id": event.id},
+        ),
     )
     return {"question": question_response(question), "event": event_response(event), "suppressed": False, "suppression_reason": None}
 
@@ -405,6 +683,7 @@ def update_question(
     context_patch: dict[str, Any] | None = None,
     artifact_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    before_state = _question_state(question)
     if topic is not None:
         question.topic = topic.strip()[:255] or question.topic
     if summary is not None:
@@ -431,19 +710,37 @@ def update_question(
         question.artifact_refs_json = [item for item in artifact_refs if isinstance(item, dict)]
     question.updated_at = _utcnow()
     db.flush()
+    changed_fields = diff_field_paths(before_state, _question_state(question))
+    correlation_id = new_correlation_id()
     event = append_question_event(
         db,
         question_id=question.id,
         family_id=question.family_id,
         actor=actor,
         event_type="updated",
-        payload={"status": question.status, "answer_sufficiency_state": question.answer_sufficiency_state},
+        payload={
+            "status": question.status,
+            "answer_sufficiency_state": question.answer_sufficiency_state,
+            "changed_fields": changed_fields,
+        },
+    )
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type="question.updated",
+        correlation_id=correlation_id,
+        payload=_question_event_payload(
+            question,
+            changed_fields=changed_fields,
+            extra_payload={"event_id": event.id},
+        ),
     )
     return {"question": question_response(question), "event": event_response(event)}
 
 
 def release_expired_claims(db: Session, *, family_id: int | None = None, actor: str = "system") -> int:
     now = _utcnow()
+    correlation_id = new_correlation_id()
     query = select(QuestionRecord).where(
         QuestionRecord.current_claim_token.is_not(None),
         QuestionRecord.current_claim_expires_at.is_not(None),
@@ -468,12 +765,23 @@ def release_expired_claims(db: Session, *, family_id: int | None = None, actor: 
             event_type="claim_released",
             payload={"reason": "lease_expired", "claim_token": token},
         )
+        _publish_question_event(
+            question=item,
+            actor=actor,
+            event_type="question.claim_released",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                item,
+                extra_payload={"release_reason": "lease_expired", "claim_token": token},
+            ),
+        )
     db.flush()
     return len(items)
 
 
 def expire_questions(db: Session, *, family_id: int | None = None, actor: str = "system") -> int:
     now = _utcnow()
+    correlation_id = new_correlation_id()
     query = select(QuestionRecord).where(
         QuestionRecord.status.in_(sorted(ACTIVE_QUESTION_STATUSES)),
         QuestionRecord.expires_at.is_not(None),
@@ -498,12 +806,23 @@ def expire_questions(db: Session, *, family_id: int | None = None, actor: str = 
             event_type="expired",
             payload={"expired_at": now.isoformat()},
         )
+        _publish_question_event(
+            question=item,
+            actor=actor,
+            event_type="question.expired",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                item,
+                extra_payload={"expired_at": now.isoformat()},
+            ),
+        )
     db.flush()
     return len(items)
 
 
 def _requeue_stale_asked_questions(db: Session, *, actor: str = "system") -> int:
     threshold = _utcnow() - timedelta(hours=settings.question_requeue_stale_asked_hours)
+    correlation_id = new_correlation_id()
     items = db.execute(
         select(QuestionRecord).where(
             QuestionRecord.status == "asked",
@@ -523,12 +842,23 @@ def _requeue_stale_asked_questions(db: Session, *, actor: str = "system") -> int
             event_type="requeued",
             payload={"reason": "stale_asked_without_response"},
         )
+        _publish_question_event(
+            question=item,
+            actor=actor,
+            event_type="question.requeued",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                item,
+                extra_payload={"requeue_reason": "stale_asked_without_response"},
+            ),
+        )
     db.flush()
     return len(items)
 
 
 def cleanup_question_backlog(db: Session, *, actor: str = "system") -> dict[str, int]:
     now = _utcnow()
+    correlation_id = new_correlation_id()
     stale_pending_cutoff = now - timedelta(days=settings.question_stale_pending_days)
     stale_pending = db.execute(
         select(QuestionRecord).where(
@@ -546,6 +876,16 @@ def cleanup_question_backlog(db: Session, *, actor: str = "system") -> dict[str,
             actor=actor,
             event_type="dismissed",
             payload={"reason": "stale_pending_backlog_cleanup"},
+        )
+        _publish_question_event(
+            question=item,
+            actor=actor,
+            event_type="question.dismissed",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                item,
+                extra_payload={"dismissal_reason": "stale_pending_backlog_cleanup"},
+            ),
         )
     db.flush()
     return {
@@ -660,6 +1000,7 @@ def claim_next_questions(
     timezone_name: str | None = None,
 ) -> dict[str, Any]:
     now = _utcnow()
+    correlation_id = new_correlation_id()
     expire_questions(db, family_id=family_id, actor="system")
     release_expired_claims(db, family_id=family_id, actor="system")
 
@@ -724,6 +1065,23 @@ def claim_next_questions(
             event_type="claimed",
             payload={"claim_token": claim_token, "agent_id": agent_id, "channel": channel, "expires_at": expires_at.isoformat()},
         )
+        _publish_question_event(
+            question=item,
+            actor=actor,
+            event_type="question.claimed",
+            correlation_id=correlation_id,
+            payload=_question_event_payload(
+                item,
+                extra_payload={
+                    "claim_token": claim_token,
+                    "delivery": {
+                        "delivery_agent": agent_id,
+                        "delivery_channel": channel,
+                        "expires_at": expires_at.isoformat(),
+                    },
+                },
+            ),
+        )
     db.flush()
     return {"items": [question_response(item) for item in chosen], "claim_token": claim_token, "eligible": True, "reason": None}
 
@@ -740,6 +1098,7 @@ def mark_question_asked(
 ) -> dict[str, Any]:
     if claim_token and question.current_claim_token and claim_token != question.current_claim_token:
         raise HTTPException(status_code=409, detail="question claim token mismatch")
+    before_state = _question_state(question)
     now = _utcnow()
     question.status = "asked"
     question.last_asked_at = now
@@ -772,6 +1131,18 @@ def mark_question_asked(
         event_type="asked",
         payload={"delivery_agent": delivery_agent, "delivery_channel": delivery_channel, "claim_token": claim_token},
     )
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type="question.asked",
+        correlation_id=new_correlation_id(),
+        payload=_question_event_payload(
+            question,
+            changed_fields=diff_field_paths(before_state, _question_state(question)),
+            attempt=attempt,
+            extra_payload={"event_id": event.id},
+        ),
+    )
     return {"question": question_response(question), "event": event_response(event), "attempt": attempt_response(attempt)}
 
 
@@ -788,6 +1159,7 @@ def answer_question(
     outcome: str = "responded",
     context_patch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    before_state = _question_state(question)
     now = _sanitize_due_date(responded_at) or _utcnow()
     question.answer_text = answer_text.strip()
     question.answered_at = now
@@ -831,6 +1203,20 @@ def answer_question(
         event_type="answered",
         payload={"status": status, "resolution_note": resolution_note or "", "answer_sufficiency_state": question.answer_sufficiency_state},
     )
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type="question.answered",
+        correlation_id=new_correlation_id(),
+        payload=_question_event_payload(
+            question,
+            changed_fields=diff_field_paths(before_state, _question_state(question)),
+            resolution_note=resolution_note,
+            attempt=attempt,
+            extra_payload={"event_id": event.id, "response_outcome": outcome},
+        ),
+        occurred_at=now,
+    )
     return {"question": question_response(question), "event": event_response(event), "attempt": attempt_response(attempt) if attempt else None}
 
 
@@ -844,6 +1230,7 @@ def resolve_question(
     answer_sufficiency_state: str | None = None,
     context_patch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    before_state = _question_state(question)
     now = _utcnow()
     question.status = status
     if answer_sufficiency_state is not None:
@@ -869,6 +1256,24 @@ def resolve_question(
         event_type=status,
         payload={"resolution_note": resolution_note or "", "answer_sufficiency_state": question.answer_sufficiency_state},
     )
+    canonical_event_type = {
+        "resolved": "question.resolved",
+        "dismissed": "question.dismissed",
+        "expired": "question.expired",
+    }.get(status, "question.updated")
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type=canonical_event_type,
+        correlation_id=new_correlation_id(),
+        payload=_question_event_payload(
+            question,
+            changed_fields=diff_field_paths(before_state, _question_state(question)),
+            resolution_note=resolution_note,
+            extra_payload={"event_id": event.id},
+        ),
+        occurred_at=now,
+    )
     return {"question": question_response(question), "event": event_response(event)}
 
 
@@ -886,15 +1291,25 @@ def list_question_history(db: Session, *, family_id: int, question_id: str | Non
     }
 
 
-def delete_question(db: Session, *, question: QuestionRecord) -> None:
+def delete_question(db: Session, *, question: QuestionRecord, actor: str) -> None:
+    payload = _question_event_payload(question)
+    correlation_id = new_correlation_id()
     db.delete(question)
     db.flush()
+    _publish_question_event(
+        question=question,
+        actor=actor,
+        event_type="question.deleted",
+        correlation_id=correlation_id,
+        payload=payload,
+    )
 
 
 def purge_questions(
     db: Session,
     *,
     family_id: int,
+    actor: str,
     question_ids: list[str] | None = None,
     domain: str | None = None,
     status: str | None = None,
@@ -903,17 +1318,43 @@ def purge_questions(
 ) -> int:
     if not purge_all and not question_ids and not any([domain, status, category]):
         raise HTTPException(status_code=400, detail="purge requires all=true or one or more filters")
-    query = delete(QuestionRecord).where(QuestionRecord.family_id == family_id)
+    select_query = select(QuestionRecord).where(QuestionRecord.family_id == family_id)
     if question_ids:
-        query = query.where(QuestionRecord.id.in_(question_ids))
+        select_query = select_query.where(QuestionRecord.id.in_(question_ids))
     if domain:
-        query = query.where(QuestionRecord.domain == domain)
+        select_query = select_query.where(QuestionRecord.domain == domain)
     if status:
-        query = query.where(QuestionRecord.status == status)
+        select_query = select_query.where(QuestionRecord.status == status)
     if category:
-        query = query.where(QuestionRecord.category == _normalize_category(category, None))
-    result = db.execute(query)
+        select_query = select_query.where(QuestionRecord.category == _normalize_category(category, None))
+    items = db.execute(select_query).scalars().all()
+    if not items:
+        return 0
+    result = db.execute(delete(QuestionRecord).where(QuestionRecord.id.in_([item.id for item in items])))
     db.flush()
+    correlation_id = new_correlation_id()
+    _publish_question_summary_event(
+        family_id=family_id,
+        actor=actor,
+        event_type="question.purged",
+        subject_id=f"purge:{family_id}:{correlation_id}",
+        correlation_id=correlation_id,
+        payload={
+            "title": "Question backlog purge",
+            "purged_count": len(items),
+            "affected_question_ids": [item.id for item in items[:25]],
+            "affected_domains": sorted({item.domain for item in items}),
+            "affected_statuses": sorted({item.status for item in items}),
+            "affected_source_agents": sorted({item.source_agent for item in items}),
+            "filters": {
+                "question_ids": question_ids or [],
+                "domain": domain,
+                "status": status,
+                "category": _normalize_category(category, None) if category else None,
+                "all": purge_all,
+            },
+        },
+    )
     return int(result.rowcount or 0)
 
 

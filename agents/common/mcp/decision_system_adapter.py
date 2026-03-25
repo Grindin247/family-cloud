@@ -210,11 +210,15 @@ def _to_plan(op: PlannedOperation) -> _OperationPlan:
 @dataclass
 class DecisionSystemTools:
     http: HttpToolClient
+    file_http: HttpToolClient | None = None
     event_http: HttpToolClient | None = None
     question_http: HttpToolClient | None = None
 
     def _headers(self, actor_email: str | None) -> dict[str, str] | None:
         return {"X-Dev-User": actor_email} if actor_email else None
+
+    def _file_client(self) -> HttpToolClient:
+        return self.file_http or HttpToolClient(base_url=settings.file_api_base_url)
 
     def _event_client(self) -> HttpToolClient:
         return self.event_http or HttpToolClient(base_url=settings.family_event_api_base_url)
@@ -399,7 +403,7 @@ class DecisionSystemTools:
         actor_email: str | None = None,
         owner_person_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._file_client().request(
             "POST",
             "/notes/search",
             json_body={
@@ -440,7 +444,7 @@ class DecisionSystemTools:
         metadata: dict[str, Any] | None = None,
         owner_person_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._file_client().request(
             "POST",
             "/files/index",
             json_body={
@@ -483,7 +487,7 @@ class DecisionSystemTools:
         actor_email: str | None = None,
         owner_person_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._file_client().request(
             "POST",
             "/files/search",
             json_body={

@@ -18,7 +18,9 @@ from app.services.budget import (
     person_allowance_map,
     person_remaining_in_period,
 )
+from app.services.family_events import make_backend_event_payload
 from app.services.identity import list_family_persons
+from agents.common.family_events import make_privacy, publish_event as publish_family_event
 
 router = APIRouter(prefix="/v1/budgets", tags=["budgets"])
 
@@ -53,6 +55,28 @@ def _summary_response(db: Session, family_id: int, period, policy: BudgetPolicy)
         period_end_date=period.end_date,
         members=summaries,
     )
+
+
+def _actor_id(ctx: AuthContext | None) -> str:
+    return ctx.email if ctx is not None else "system"
+
+
+def _emit_budget_event(*, family_id: int, actor_id: str, event_type: str, payload: dict) -> None:
+    event = make_backend_event_payload(
+        family_id=family_id,
+        domain="decision",
+        event_type=event_type,
+        actor_id=actor_id,
+        actor_type="user" if actor_id != "system" else "system",
+        subject_id=str(family_id),
+        subject_type="budget",
+        payload=payload,
+        source_agent_id="DecisionAgent",
+        source_runtime="backend",
+        tags=["budget"],
+        privacy=make_privacy(contains_financial_data=True),
+    )
+    publish_family_event(event)
 
 
 @router.get("/families/{family_id}", response_model=BudgetSummaryResponse)
@@ -95,6 +119,11 @@ def update_budget_policy(
             raise HTTPException(status_code=400, detail=f"person {item.person_id} does not belong to family")
 
     policy = get_or_create_policy(db, family_id)
+    before_policy = {
+        "threshold_1_to_5": policy.threshold_1_to_5,
+        "period_days": policy.period_days,
+        "default_allowance": policy.default_allowance,
+    }
     policy.threshold_1_to_5 = payload.threshold_1_to_5
     policy.period_days = payload.period_days
     policy.default_allowance = payload.default_allowance
@@ -133,6 +162,30 @@ def update_budget_policy(
                 )
             )
     db.commit()
+    try:
+        _emit_budget_event(
+            family_id=family_id,
+            actor_id=_actor_id(ctx),
+            event_type="budget.policy.updated",
+            payload={
+                "title": "Budget policy updated",
+                "threshold_1_to_5": policy.threshold_1_to_5,
+                "period_days": policy.period_days,
+                "default_allowance": policy.default_allowance,
+                "member_allowance_count": len(payload.person_allowances),
+                "changed_fields": [
+                    field
+                    for field, value in {
+                        "threshold_1_to_5": policy.threshold_1_to_5,
+                        "period_days": policy.period_days,
+                        "default_allowance": policy.default_allowance,
+                    }.items()
+                    if before_policy.get(field) != value
+                ],
+            },
+        )
+    except Exception:
+        pass
     return _summary_response(db, family_id, period, policy)
 
 
@@ -156,4 +209,19 @@ def reset_budget_period(
 
     new_period = ensure_active_period(db, family_id, today=today)
     db.commit()
+    try:
+        _emit_budget_event(
+            family_id=family_id,
+            actor_id=_actor_id(ctx),
+            event_type="budget.period.reset",
+            payload={
+                "title": "Budget period reset",
+                "period_start_date": new_period.start_date.isoformat(),
+                "period_end_date": new_period.end_date.isoformat(),
+                "threshold_1_to_5": policy.threshold_1_to_5,
+                "default_allowance": policy.default_allowance,
+            },
+        )
+    except Exception:
+        pass
     return _summary_response(db, family_id, new_period, policy)

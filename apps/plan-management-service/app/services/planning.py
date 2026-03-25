@@ -11,7 +11,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from agents.common.family_events import build_event, make_privacy, publish_event as publish_family_event
+from agents.common.family_events import (
+    build_event,
+    diff_field_paths,
+    make_privacy,
+    new_correlation_id,
+    publish_event as publish_family_event,
+    snippet_fields,
+)
 from app.core.errors import raise_api_error
 from app.models.planning import Plan, PlanCheckIn, PlanGoalLink, PlanInstance, PlanParticipant, PlanTaskSuggestion
 from app.schemas.planning import (
@@ -424,33 +431,128 @@ def _occurrences_for_window(row: Plan, *, days: int = 14) -> list[datetime]:
     return items
 
 
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).isoformat()
+    return value.astimezone(UTC).isoformat()
+
+
+def _schedule_summary(row: Plan) -> dict[str, Any]:
+    schedule = _schedule_from_row(row)
+    return {
+        "frequency": schedule.frequency,
+        "interval": schedule.interval,
+        "timezone": schedule.timezone,
+        "weekdays": list(schedule.weekdays or []),
+        "local_time": schedule.local_time.isoformat() if schedule.local_time else None,
+        "excluded_dates": [item.isoformat() for item in schedule.excluded_dates],
+    }
+
+
+def _plan_state(db: Session, *, row: Plan) -> dict[str, Any]:
+    participants = _participant_ids(db, plan_id=row.plan_id)
+    goal_links = _goal_link_responses(db, plan_id=row.plan_id)
+    task_suggestions = _task_suggestion_responses(db, plan_id=row.plan_id)
+    instances = _instance_responses(db, plan_id=row.plan_id)
+    milestones = _milestones_from_row(row)
+    return {
+        "title": row.title,
+        "summary": row.summary,
+        "plan_kind": row.plan_kind,
+        "status": row.status,
+        "owner_scope": row.owner_scope,
+        "owner_person_id": str(row.owner_person_id) if row.owner_person_id else None,
+        "participant_person_ids": participants,
+        "schedule": _schedule_summary(row),
+        "start_date": row.start_date.isoformat() if row.start_date else None,
+        "end_date": row.end_date.isoformat() if row.end_date else None,
+        "milestones": [item.model_dump(mode="json") for item in milestones],
+        "goal_links": [item.model_dump(mode="json") for item in goal_links],
+        "task_suggestions": [item.model_dump(mode="json") for item in task_suggestions],
+        "feasibility_summary": dict(row.feasibility_summary_json or {}),
+        "adherence_summary": _adherence_summary(instances).model_dump(mode="json"),
+        "missing_fields": missing_fields_for_activation(row, participants),
+    }
+
+
+def _plan_event_payload(
+    db: Session,
+    *,
+    row: Plan,
+    extra_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    participants = _participant_ids(db, plan_id=row.plan_id)
+    goal_links = _goal_link_responses(db, plan_id=row.plan_id)
+    task_suggestions = _task_suggestion_responses(db, plan_id=row.plan_id)
+    instances = _instance_responses(db, plan_id=row.plan_id)
+    milestones = _milestones_from_row(row)
+    adherence = _adherence_summary(instances).model_dump(mode="json")
+    payload: dict[str, Any] = {
+        "plan_id": str(row.plan_id),
+        "status": row.status,
+        "plan_kind": row.plan_kind,
+        "owner_scope": row.owner_scope,
+        "owner_person_id": str(row.owner_person_id) if row.owner_person_id else None,
+        "participant_person_ids": participants,
+        "participant_count": len(participants),
+        "goal_ids": [item.goal_id for item in goal_links],
+        "goal_count": len(goal_links),
+        "milestone_count": len(milestones),
+        "task_suggestion_count": len(task_suggestions),
+        "schedule_summary": _schedule_summary(row),
+        "adherence_summary": adherence,
+        "checkin_count": len(_list_checkins(db, plan_id=row.plan_id)),
+        "missing_fields": missing_fields_for_activation(row, participants),
+        "feasibility_status": str((row.feasibility_summary_json or {}).get("status") or ""),
+        "start_date": row.start_date.isoformat() if row.start_date else None,
+        "end_date": row.end_date.isoformat() if row.end_date else None,
+        "created_at": _isoformat(row.created_at),
+        "updated_at": _isoformat(row.updated_at),
+        "archived_at": _isoformat(row.archived_at),
+    }
+    if extra_payload:
+        payload.update({key: value for key, value in extra_payload.items() if value is not None})
+    payload.update(snippet_fields("title", row.title))
+    payload.update(snippet_fields("summary", row.summary))
+    payload["title"] = payload.get("title_snippet") or f"Plan {row.plan_id}"
+    return payload
+
+
 def _publish_plan_event(
     *,
-    family_id: int,
+    db: Session,
+    row: Plan,
     event_type: str,
     actor_id: str,
     actor_type: str,
     actor_person_id: str | None,
-    plan_id: str,
-    subject_person_id: str | None,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     tags: list[str],
+    correlation_id: str | None = None,
 ) -> None:
     try:
+        full_payload = _plan_event_payload(db, row=row, extra_payload=payload)
         event = build_event(
-            family_id=family_id,
+            family_id=row.family_id,
             domain="planning",
             event_type=event_type,
             actor={"actor_type": actor_type, "actor_id": actor_id, "person_id": actor_person_id},
-            subject={"subject_type": "plan", "subject_id": plan_id, "person_id": subject_person_id},
-            payload=payload,
+            subject={"subject_type": "plan", "subject_id": str(row.plan_id), "person_id": str(row.owner_person_id) if row.owner_person_id else None},
+            payload=full_payload,
             source={"agent_id": "PlanningService", "runtime": "backend"},
-            privacy=make_privacy(contains_pii=True, contains_child_data=bool(subject_person_id)),
+            privacy=make_privacy(
+                contains_pii=True,
+                contains_child_data=bool(row.owner_person_id),
+                contains_free_text=any(key.endswith("_snippet") for key in full_payload),
+            ),
             tags=tags,
+            correlation_id=correlation_id,
         )
         publish_family_event(event)
     except Exception:
-        logger.exception("Failed to publish planning event family_id=%s event_type=%s plan_id=%s", family_id, event_type, plan_id)
+        logger.exception("Failed to publish planning event family_id=%s event_type=%s plan_id=%s", row.family_id, event_type, row.plan_id)
 
 
 def reconcile_plan_instances(db: Session, *, row: Plan, context: PlanContext) -> list[PlanInstance]:
@@ -465,14 +567,14 @@ def reconcile_plan_instances(db: Session, *, row: Plan, context: PlanContext) ->
             instance.status = "missed"
             instance.updated_at = now
             changed = True
+            db.flush()
             _publish_plan_event(
-                family_id=row.family_id,
+                db=db,
+                row=row,
                 event_type="plan.instance.missed",
                 actor_id=context.actor_id,
                 actor_type=context.actor_type,
                 actor_person_id=context.actor_person_id,
-                plan_id=str(row.plan_id),
-                subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
                 payload={"plan_id": str(row.plan_id), "instance_id": str(instance.instance_id), "scheduled_for": instance.scheduled_for.isoformat()},
                 tags=["planning", row.plan_kind, "instance"],
             )
@@ -492,14 +594,14 @@ def reconcile_plan_instances(db: Session, *, row: Plan, context: PlanContext) ->
         )
         db.add(instance)
         changed = True
+        db.flush()
         _publish_plan_event(
-            family_id=row.family_id,
+            db=db,
+            row=row,
             event_type="plan.instance.scheduled",
             actor_id=context.actor_id,
             actor_type=context.actor_type,
             actor_person_id=context.actor_person_id,
-            plan_id=str(row.plan_id),
-            subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
             payload={"plan_id": str(row.plan_id), "instance_id": str(instance.instance_id), "scheduled_for": scheduled_for.isoformat()},
             tags=["planning", row.plan_kind, "instance"],
         )
@@ -622,13 +724,12 @@ def create_plan(
     db.commit()
     db.refresh(row)
     _publish_plan_event(
-        family_id=family_id,
+        db=db,
+        row=row,
         event_type="plan.created",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={"plan_id": str(row.plan_id), "title": row.title, "status": row.status, "plan_kind": row.plan_kind},
         tags=["planning", row.plan_kind],
     )
@@ -646,6 +747,7 @@ def update_plan(
     context: PlanContext,
     persons_by_id: dict[str, dict[str, Any]],
 ) -> Plan:
+    before_state = _plan_state(db, row=row)
     next_owner_scope = payload.owner_scope or row.owner_scope
     next_owner_person_id = payload.owner_person_id if payload.owner_person_id is not None else (str(row.owner_person_id) if row.owner_person_id else None)
     next_participants = payload.participant_person_ids if payload.participant_person_ids is not None else _participant_ids(db, plan_id=row.plan_id)
@@ -712,28 +814,37 @@ def update_plan(
         row.archived_at = row.updated_at
     db.commit()
     db.refresh(row)
+    after_state = _plan_state(db, row=row)
+    changed_fields = diff_field_paths(before_state, after_state)
+    correlation_id = new_correlation_id()
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type="plan.updated",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
-        payload={"plan_id": str(row.plan_id), "title": row.title, "status": row.status, "plan_kind": row.plan_kind},
+        payload={
+            "plan_id": str(row.plan_id),
+            "title": row.title,
+            "status": row.status,
+            "plan_kind": row.plan_kind,
+            "changed_fields": changed_fields,
+        },
         tags=["planning", row.plan_kind],
+        correlation_id=correlation_id,
     )
     if any(item.goal_id for item in next_goal_links):
         _publish_plan_event(
-            family_id=row.family_id,
+            db=db,
+            row=row,
             event_type="plan.goal_linked",
             actor_id=context.actor_id,
             actor_type=context.actor_type,
             actor_person_id=context.actor_person_id,
-            plan_id=str(row.plan_id),
-            subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
             payload={"plan_id": str(row.plan_id), "goal_ids": [item.goal_id for item in next_goal_links]},
             tags=["planning", row.plan_kind, "goal-link"],
+            correlation_id=correlation_id,
         )
     if row.status == "active":
         reconcile_plan_instances(db, row=row, context=context)
@@ -751,13 +862,12 @@ def activate_plan(db: Session, *, row: Plan, context: PlanContext) -> Plan:
     db.commit()
     db.refresh(row)
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type="plan.activated",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={"plan_id": str(row.plan_id), "status": row.status},
         tags=["planning", row.plan_kind],
     )
@@ -771,13 +881,12 @@ def pause_plan(db: Session, *, row: Plan, context: PlanContext) -> Plan:
     db.commit()
     db.refresh(row)
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type="plan.paused",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={"plan_id": str(row.plan_id), "status": row.status},
         tags=["planning", row.plan_kind],
     )
@@ -791,13 +900,12 @@ def archive_plan(db: Session, *, row: Plan, context: PlanContext) -> Plan:
     db.commit()
     db.refresh(row)
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type="plan.archived",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={"plan_id": str(row.plan_id), "status": row.status},
         tags=["planning", row.plan_kind],
     )
@@ -869,6 +977,7 @@ def record_checkin(
     db.add(checkin)
     db.commit()
     db.refresh(checkin)
+    correlation_id = new_correlation_id()
 
     event_type = {
         "done": "plan.instance.completed",
@@ -877,29 +986,29 @@ def record_checkin(
         "scheduled": "plan.instance.scheduled",
     }.get(payload.status, "plan.instance.completed")
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type=event_type,
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={
             "plan_id": str(row.plan_id),
             "instance_id": str(instance.instance_id),
             "status": payload.status,
             "scheduled_for": instance.scheduled_for.isoformat(),
+            "changed_fields": ["status", "updated_at"],
         },
         tags=["planning", row.plan_kind, "instance"],
+        correlation_id=correlation_id,
     )
     _publish_plan_event(
-        family_id=row.family_id,
+        db=db,
+        row=row,
         event_type="plan.checkin.recorded",
         actor_id=context.actor_id,
         actor_type=context.actor_type,
         actor_person_id=context.actor_person_id,
-        plan_id=str(row.plan_id),
-        subject_person_id=str(row.owner_person_id) if row.owner_person_id else None,
         payload={
             "plan_id": str(row.plan_id),
             "instance_id": str(instance.instance_id),
@@ -907,8 +1016,13 @@ def record_checkin(
             "status": payload.status,
             "rating": payload.rating,
             "confidence": payload.confidence,
+            "blocker_count": len(payload.blockers or []),
+            **snippet_fields("checkin_note", payload.note),
+            **snippet_fields("checkin_blockers", " | ".join(payload.blockers or [])),
+            **snippet_fields("qualitative_update", payload.qualitative_update),
         },
         tags=["planning", row.plan_kind, "checkin"],
+        correlation_id=correlation_id,
     )
     return _checkin_response(checkin)
 

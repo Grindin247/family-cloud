@@ -59,6 +59,62 @@ def test_draft_plan_queues_missing_questions_and_preserves_task_suggestions(clie
     assert preview.status_code == 200
     assert preview.json()["task_suggestions"][0]["title"] == "Order groceries"
 
+    created_event = reset_db["published_events"][0]
+    assert created_event["event_type"] == "plan.created"
+    assert created_event["payload"]["title_snippet"] == "Weeknight dinner plan"
+    assert created_event["payload"]["participant_count"] == 2
+    assert created_event["payload"]["goal_count"] == 1
+    assert created_event["payload"]["schedule_summary"]["frequency"] == "weekly"
+
+
+def test_overnight_safe_plan_updates_do_not_change_status_and_keep_missing_questions_queued(client, reset_db):
+    created = client.post(
+        "/v1/families/2/plans",
+        headers=_headers(),
+        json={
+            "title": "Bench press progression",
+            "plan_kind": "fitness_plan",
+            "status": "draft",
+            "owner_scope": "person",
+            "owner_person_id": "00000000-0000-0000-0000-000000000010",
+            "participant_person_ids": ["00000000-0000-0000-0000-000000000010"],
+            "schedule": {"frequency": "weekly", "weekdays": ["monday", "thursday"]},
+            "task_suggestions": [{"title": "Track protein", "summary": "Aim for a consistent recovery target", "status": "suggested"}],
+            "feasibility_summary": {"status": "watch", "notes": ["Need timezone before activation."]},
+        },
+    )
+    assert created.status_code == 201
+    body = created.json()
+    plan_id = body["plan_id"]
+    assert body["status"] == "draft"
+    assert "schedule.timezone" in body["missing_fields"]
+
+    updated = client.put(
+        f"/v1/families/2/plans/{plan_id}",
+        headers=_headers(),
+        json={
+            "task_suggestions": [
+                {"title": "Prep bench day breakfast", "summary": "Add carbs and protein before the morning lift", "status": "suggested"}
+            ],
+            "feasibility_summary": {"status": "watch", "notes": ["Still waiting on timezone before activation."]},
+        },
+    )
+    assert updated.status_code == 200
+    refreshed = updated.json()
+    assert refreshed["status"] == "draft"
+    assert refreshed["task_suggestions"][0]["title"] == "Prep bench day breakfast"
+    assert refreshed["feasibility_summary"]["status"] == "watch"
+    assert "schedule.timezone" in refreshed["missing_fields"]
+
+    queued = reset_db["queued_questions"]
+    assert len(queued) >= 2
+    assert queued[-1]["payload"]["domain"] == "planning"
+    assert queued[-1]["payload"]["source_agent"] == "planning-agent"
+    assert queued[-1]["payload"]["dedupe_key"].endswith(":schedule.timezone")
+
+    updated_event = next(event for event in reset_db["published_events"] if event["event_type"] == "plan.updated")
+    assert "status" not in updated_event["payload"]["changed_fields"]
+
 
 def test_individual_plan_activation_instances_and_checkins(client, reset_db):
     created = client.post(
@@ -118,6 +174,54 @@ def test_individual_plan_activation_instances_and_checkins(client, reset_db):
     assert "plan.activated" in event_types
     assert "plan.instance.completed" in event_types
     assert "plan.checkin.recorded" in event_types
+    completed_event = next(event for event in reset_db["published_events"] if event["event_type"] == "plan.instance.completed")
+    checkin_event = next(event for event in reset_db["published_events"] if event["event_type"] == "plan.checkin.recorded")
+    assert completed_event["correlation"]["correlation_id"] == checkin_event["correlation"]["correlation_id"]
+    assert checkin_event["payload"]["checkin_note_snippet"] == "Finished the first session."
+    assert checkin_event["payload"]["qualitative_update_snippet"] == "Need lighter squats next time."
+
+
+def test_overnight_plan_updates_can_refresh_safe_fields_without_pausing_or_archiving_active_plans(client, reset_db):
+    created = client.post(
+        "/v1/families/2/plans",
+        headers=_headers(),
+        json={
+            "title": "Strength block",
+            "plan_kind": "fitness_plan",
+            "status": "draft",
+            "owner_scope": "person",
+            "owner_person_id": "00000000-0000-0000-0000-000000000010",
+            "participant_person_ids": ["00000000-0000-0000-0000-000000000010"],
+            "schedule": {
+                "timezone": "America/New_York",
+                "frequency": "weekly",
+                "weekdays": ["monday", "wednesday", "friday"],
+                "local_time": "07:00:00",
+            },
+            "task_suggestions": [{"title": "Buy wrist wraps", "summary": "Optional bench support", "status": "suggested"}],
+            "feasibility_summary": {"status": "ready", "notes": ["Garage setup is enough."]},
+        },
+    )
+    assert created.status_code == 201
+    plan_id = created.json()["plan_id"]
+
+    activated = client.post(f"/v1/families/2/plans/{plan_id}/activate", headers=_headers())
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "active"
+
+    updated = client.put(
+        f"/v1/families/2/plans/{plan_id}",
+        headers=_headers(),
+        json={
+            "task_suggestions": [{"title": "Pack post-workout shake", "summary": "Reduce missed recovery meals", "status": "suggested"}],
+            "feasibility_summary": {"status": "ready", "notes": ["Recovery meals are now prepped ahead."]},
+        },
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["status"] == "active"
+    assert body["task_suggestions"][0]["title"] == "Pack post-workout shake"
+    assert body["feasibility_summary"]["notes"] == ["Recovery meals are now prepped ahead."]
 
 
 def test_invalid_goal_and_participant_validation(client):

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     family_event_internal_admin_token: str = "change-me"
     question_api_base_url: str = "http://question-api:8000/v1"
     question_internal_admin_token: str = "change-me"
+    file_api_base_url: str = ""
     decision_self_api_base_url: str = "http://decision-api:8000/v1"
     task_vikunja_url: str = "http://vikunja:3456"
     task_vikunja_api_prefix: str = "/api/v1"

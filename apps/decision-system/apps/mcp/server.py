@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 SERVER_NAME = "decision-system-mcp"
 API_BASE = os.getenv("DECISION_API_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+FILE_API_BASE = os.getenv("FILE_API_BASE_URL", API_BASE).rstrip("/")
 EVENT_API_BASE = os.getenv("FAMILY_EVENT_API_BASE_URL", "http://localhost:8010/v1").rstrip("/")
 QUESTION_API_BASE = os.getenv("QUESTION_API_BASE_URL", "http://localhost:8030/v1").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("DECISION_MCP_HTTP_TIMEOUT_SECONDS", "20"))
@@ -149,6 +150,44 @@ def _event_request(
         parsed = response.json()
     except requests.JSONDecodeError:
         parsed = {"raw": response.text}
+    if not response.ok:
+        raise RuntimeError(f"{method} {path} failed ({response.status_code}): {parsed}")
+    return {"status_code": response.status_code, "body": parsed}
+
+
+def _file_request(
+    method: str,
+    path: str,
+    actor_id: str,
+    actor_name: str | None,
+    body: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Decision-Actor-Id": actor_id,
+    }
+    if actor_id:
+        headers["X-Dev-User"] = actor_id
+    if actor_name:
+        headers["X-Decision-Actor-Name"] = actor_name
+
+    response = requests.request(
+        method=method,
+        url=f"{FILE_API_BASE}{path}",
+        params=query,
+        json=body,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 204:
+        return {"status_code": response.status_code, "body": None}
+
+    try:
+        parsed = response.json()
+    except requests.JSONDecodeError:
+        parsed = {"raw": response.text}
+
     if not response.ok:
         raise RuntimeError(f"{method} {path} failed ({response.status_code}): {parsed}")
     return {"status_code": response.status_code, "body": parsed}
@@ -668,7 +707,7 @@ def search_notes(
     owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Search indexed notes."""
-    return _request(
+    return _file_request(
         "POST",
         "/notes/search",
         actor_id=actor_id,
@@ -680,6 +719,44 @@ def search_notes(
             "top_k": top_k,
             "include_content": include_content,
             "owner_person_id": owner_person_id,
+        },
+    )["body"]
+
+
+@mcp.tool()
+def search_documents(
+    family_id: int,
+    actor_id: str,
+    query_text: str,
+    top_k: int = 8,
+    include_content: bool = True,
+    owner_person_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    document_kinds: list[str] | None = None,
+    preferred_item_types: list[str] | None = None,
+    content_types: list[str] | None = None,
+    query_tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Search indexed notes and files with unified hybrid retrieval."""
+    return _file_request(
+        "POST",
+        "/search",
+        actor_id=actor_id,
+        actor_name=SERVER_NAME,
+        body={
+            "family_id": family_id,
+            "actor": actor_id,
+            "query": query_text,
+            "top_k": top_k,
+            "owner_person_id": owner_person_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            "document_kinds": document_kinds or [],
+            "preferred_item_types": preferred_item_types or [],
+            "content_types": content_types or [],
+            "query_tags": query_tags or [],
+            "include_content": include_content,
         },
     )["body"]
 
@@ -711,7 +788,7 @@ def index_file_document(
     owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Index or update a file document for retrieval."""
-    return _request(
+    return _file_request(
         "POST",
         "/files/index",
         actor_id=actor_id,
@@ -756,7 +833,7 @@ def search_files(
     owner_person_id: str | None = None,
 ) -> dict[str, Any]:
     """Search indexed files across notes, documents, and media."""
-    return _request(
+    return _file_request(
         "POST",
         "/files/search",
         actor_id=actor_id,

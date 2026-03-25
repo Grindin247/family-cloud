@@ -49,6 +49,7 @@ app.dependency_overrides[get_db] = override_get_db
 def reset_db(monkeypatch):
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    published_events: list[dict] = []
     monkeypatch.setattr("app.routers.profile.ensure_family_access", lambda **kwargs: None)
     monkeypatch.setattr("app.routers.profile.ensure_profile_enabled", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -126,8 +127,8 @@ def reset_db(monkeypatch):
             "updated_at": "2026-03-21T12:00:00Z",
         },
     )
-    monkeypatch.setattr("app.services.profile.publish_family_event", lambda *args, **kwargs: "evt-1")
-    yield
+    monkeypatch.setattr("app.services.profile.publish_family_event", lambda event: published_events.append(event) or "evt-1")
+    yield {"published_events": published_events}
 
 
 @pytest.fixture

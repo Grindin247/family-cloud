@@ -7,6 +7,9 @@ os.environ["APP_ENV"] = "test"
 APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +42,7 @@ app.dependency_overrides[get_db] = override_get_db
 def reset_db(monkeypatch):
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    published_events: list[dict] = []
     monkeypatch.setattr("app.services.decision_api.ensure_family_access", lambda **kwargs: None)
     monkeypatch.setattr("app.routers.questions.ensure_family_access", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -49,7 +53,8 @@ def reset_db(monkeypatch):
         "app.services.decision_api.get_family_context",
         lambda **kwargs: {"family_id": 2, "family_slug": "callender", "member_id": 1, "is_family_admin": True, "persons": []},
     )
-    yield
+    monkeypatch.setattr("app.services.questions.publish_family_event", lambda event: published_events.append(event) or "evt-1")
+    yield {"published_events": published_events}
 
 
 @pytest.fixture

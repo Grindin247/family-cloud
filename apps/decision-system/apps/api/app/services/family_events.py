@@ -36,8 +36,8 @@ def _json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-KNOWN_DOMAINS = ("decision", "task", "file", "note", "education", "profile", "planning")
-METADATA_TOPIC_KEYS = ("note_type", "category", "project", "bucket", "status", "score_type", "area", "goal")
+KNOWN_DOMAINS = ("decision", "task", "file", "note", "education", "profile", "planning", "question", "family")
+METADATA_TOPIC_KEYS = ("note_type", "category", "project", "bucket", "status", "score_type", "area", "goal", "origin_domain", "feature_key")
 
 
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +158,20 @@ def _filter_event_dicts(
             filtered.append(row)
         elif metric == "goals.updated.count" and event_type in {"goal.created", "goal.updated", "goal.deleted"}:
             filtered.append(row)
+        elif metric == "questions.created.count" and event_type == "question.created":
+            filtered.append(row)
+        elif metric == "questions.answered.count" and event_type == "question.answered":
+            filtered.append(row)
+        elif metric == "questions.resolved.count" and event_type == "question.resolved":
+            filtered.append(row)
+        elif metric == "plans.created.count" and event_type == "plan.created":
+            filtered.append(row)
+        elif metric == "plan.checkins.count" and event_type == "plan.checkin.recorded":
+            filtered.append(row)
+        elif metric == "profiles.updated.count" and event_type == "profile.person.updated":
+            filtered.append(row)
+        elif metric == "family.members.changed.count" and event_type in {"family_member.created", "family_member.updated", "family_member.deleted"}:
+            filtered.append(row)
         elif metric == "church.notes.count" and event_type == "note.created" and (payload.get("note_type") == "church" or "church" in row.get("tags", [])):
             filtered.append(row)
         elif metric == "decision.goal_alignment.avg" and event_type == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
@@ -243,6 +257,8 @@ def _validate_domain_payload(event: dict[str, Any]) -> None:
         raise ValueError("task.completed payload requires completed_by")
     if event_type in {"note.created", "file.indexed"} and ("path" not in payload and "file_id" not in payload and "note_id" not in payload):
         raise ValueError(f"{event_type} payload requires a stable reference")
+    if event_type.startswith("question.") and event_type != "question.purged" and "question_id" not in payload:
+        raise ValueError(f"{event_type} payload requires question_id")
 
 
 def _title_and_summary(event_type: str, payload: dict[str, Any], domain: str) -> tuple[str, str]:
@@ -293,6 +309,42 @@ def _title_and_summary(event_type: str, payload: dict[str, Any], domain: str) ->
         "profile.relationship.created": ("Relationship created", f"Relationship created: {subject_name}"),
         "profile.relationship.updated": ("Relationship updated", f"Relationship updated: {subject_name}"),
         "profile.relationship.deleted": ("Relationship removed", f"Relationship removed: {subject_name}"),
+        "plan.created": ("Plan created", f"Plan created: {subject_name}"),
+        "plan.updated": ("Plan updated", f"Plan updated: {subject_name}"),
+        "plan.goal_linked": ("Plan linked to goals", f"Plan goal links updated: {subject_name}"),
+        "plan.activated": ("Plan activated", f"Plan activated: {subject_name}"),
+        "plan.paused": ("Plan paused", f"Plan paused: {subject_name}"),
+        "plan.archived": ("Plan archived", f"Plan archived: {subject_name}"),
+        "plan.instance.scheduled": ("Plan instance scheduled", f"Plan instance scheduled: {subject_name}"),
+        "plan.instance.completed": ("Plan instance completed", f"Plan instance completed: {subject_name}"),
+        "plan.instance.skipped": ("Plan instance skipped", f"Plan instance skipped: {subject_name}"),
+        "plan.instance.missed": ("Plan instance missed", f"Plan instance missed: {subject_name}"),
+        "plan.checkin.recorded": ("Plan check-in recorded", f"Plan check-in recorded: {subject_name}"),
+        "question.created": ("Question created", f"Question created: {subject_name}"),
+        "question.updated": ("Question updated", f"Question updated: {subject_name}"),
+        "question.claimed": ("Question claimed", f"Question claimed: {subject_name}"),
+        "question.claim_released": ("Question claim released", f"Question claim released: {subject_name}"),
+        "question.asked": ("Question asked", f"Question asked: {subject_name}"),
+        "question.answered": ("Question answered", f"Question answered: {subject_name}"),
+        "question.resolved": ("Question resolved", f"Question resolved: {subject_name}"),
+        "question.dismissed": ("Question dismissed", f"Question dismissed: {subject_name}"),
+        "question.expired": ("Question expired", f"Question expired: {subject_name}"),
+        "question.requeued": ("Question requeued", f"Question requeued: {subject_name}"),
+        "question.deleted": ("Question deleted", f"Question deleted: {subject_name}"),
+        "question.purged": ("Questions purged", f"Questions purged: {subject_name}"),
+        "roadmap.created": ("Roadmap item created", f"Roadmap item created: {subject_name}"),
+        "roadmap.updated": ("Roadmap item updated", f"Roadmap item updated: {subject_name}"),
+        "roadmap.deleted": ("Roadmap item removed", f"Roadmap item removed: {subject_name}"),
+        "budget.policy.updated": ("Budget policy updated", f"Budget policy updated: {subject_name}"),
+        "budget.period.reset": ("Budget period reset", f"Budget period reset: {subject_name}"),
+        "family_dna.updated": ("Family DNA updated", f"Family DNA updated: {subject_name}"),
+        "family.created": ("Family created", f"Family created: {subject_name}"),
+        "family.updated": ("Family updated", f"Family updated: {subject_name}"),
+        "family.deleted": ("Family deleted", f"Family deleted: {subject_name}"),
+        "family_member.created": ("Family member added", f"Family member added: {subject_name}"),
+        "family_member.updated": ("Family member updated", f"Family member updated: {subject_name}"),
+        "family_member.deleted": ("Family member removed", f"Family member removed: {subject_name}"),
+        "family_feature.updated": ("Family feature updated", f"Family feature updated: {subject_name}"),
     }
     return mapping.get(event_type, (event_type.replace(".", " ").title(), f"{event_type}"))
 
@@ -538,6 +590,13 @@ def query_counts(
         "decisions.completed.count": 0.0,
         "decisions.below_threshold.count": 0.0,
         "goals.updated.count": 0.0,
+        "questions.created.count": 0.0,
+        "questions.answered.count": 0.0,
+        "questions.resolved.count": 0.0,
+        "plans.created.count": 0.0,
+        "plan.checkins.count": 0.0,
+        "profiles.updated.count": 0.0,
+        "family.members.changed.count": 0.0,
         "decision.goal_alignment.avg": 0.0,
         "church.notes.count": 0.0,
     }
@@ -563,6 +622,20 @@ def query_counts(
             metrics["decisions.below_threshold.count"] += 1.0
         elif row["event_type"] in {"goal.created", "goal.updated", "goal.deleted"}:
             metrics["goals.updated.count"] += 1.0
+        elif row["event_type"] == "question.created":
+            metrics["questions.created.count"] += 1.0
+        elif row["event_type"] == "question.answered":
+            metrics["questions.answered.count"] += 1.0
+        elif row["event_type"] == "question.resolved":
+            metrics["questions.resolved.count"] += 1.0
+        elif row["event_type"] == "plan.created":
+            metrics["plans.created.count"] += 1.0
+        elif row["event_type"] == "plan.checkin.recorded":
+            metrics["plan.checkins.count"] += 1.0
+        elif row["event_type"] == "profile.person.updated":
+            metrics["profiles.updated.count"] += 1.0
+        elif row["event_type"] in {"family_member.created", "family_member.updated", "family_member.deleted"}:
+            metrics["family.members.changed.count"] += 1.0
         elif row["event_type"] == "decision.score_calculated" and payload.get("score_type", "goal_alignment") == "goal_alignment":
             try:
                 score_values.append(float(payload["score_value"]))

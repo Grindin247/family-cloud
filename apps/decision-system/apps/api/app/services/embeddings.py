@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Iterable
 
 from openai import OpenAI
 
 from app.core.config import settings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _hash_bytes(text: str) -> bytes:
@@ -33,11 +37,14 @@ def embed_texts(texts: Iterable[str], *, dim: int = 1536) -> list[list[float]]:
     if not values:
         return []
     if settings.openai_api_key.strip():
-        client = OpenAI(api_key=settings.openai_api_key, timeout=settings.note_embedding_timeout_seconds)
-        response = client.embeddings.create(
-            model=settings.note_embedding_model,
-            input=values,
-            dimensions=dim,
-        )
-        return [list(item.embedding) for item in response.data]
+        try:
+            client = OpenAI(api_key=settings.openai_api_key, timeout=settings.note_embedding_timeout_seconds)
+            response = client.embeddings.create(
+                model=settings.note_embedding_model,
+                input=values,
+                dimensions=dim,
+            )
+            return [list(item.embedding) for item in response.data]
+        except Exception as exc:
+            LOGGER.warning("embedding_provider_failed_falling_back error=%s", exc)
     return [embed_text(t, dim=dim) for t in values]

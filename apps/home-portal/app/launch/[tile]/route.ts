@@ -23,8 +23,10 @@ function familyDomain(): string {
   return (process.env.NEXT_PUBLIC_FAMILY_DOMAIN || "").trim();
 }
 
-function decisionApiBaseUrl(): string {
-  return (process.env.HOME_PORTAL_DECISION_API_BASE_URL || "http://decision-api:8000/v1").trim().replace(/\/+$/, "");
+function fileApiBaseUrl(): string {
+  return (process.env.HOME_PORTAL_FILE_API_BASE_URL || process.env.HOME_PORTAL_DECISION_API_BASE_URL || "http://file-api:8000/v1")
+    .trim()
+    .replace(/\/+$/, "");
 }
 
 function inboxFamilyId(): number {
@@ -417,7 +419,7 @@ async function processInbox(request: NextRequest): Promise<NextResponse> {
 
   try {
     const familyId = inboxFamilyId();
-    const response = await fetch(`${decisionApiBaseUrl()}/family/${familyId}/files/process-inbox`, {
+    const response = await fetch(`${fileApiBaseUrl()}/families/${familyId}/files/process-inbox`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -7,11 +7,13 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -22,6 +24,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 CANONICAL_FOLDERS = ("Inbox", "Projects", "Areas", "Resources", "Archive", "Unfiled")
+MAX_FILE_AGENT_SUBFOLDER_DEPTH = 3
+DEFAULT_SUBFOLDER_BY_FOLDER = {
+    "Projects": "General",
+    "Areas": "General",
+    "Resources": "General",
+    "Archive": "General",
+}
 HOME_DASHBOARD_DOC_RE = re.compile(r"^Family Cloud Doc \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.md$")
 GENERIC_NAME_RE = re.compile(
     r"^(?:untitled|new(?:[-_ ]doc(?:ument)?)?|document|doc|note|notes|whiteboard|image|photo|scan|file)(?:[-_ ]\d+)?$",
@@ -102,6 +111,16 @@ RESOURCE_KEYWORDS = {
 }
 FILE_AGENT_TIMEOUT_SECONDS = int(os.environ.get("FILE_AGENT_INBOX_TIMEOUT_SECONDS", "180"))
 FILE_AGENT_MAX_TEXT_CHARS = int(os.environ.get("FILE_AGENT_INBOX_MAX_TEXT_CHARS", "12000"))
+FILE_AGENT_IMAGE_STAGING_DIR = Path(
+    os.environ.get(
+        "FILE_AGENT_IMAGE_STAGING_DIR",
+        str(Path.home() / ".openclaw" / "workspace-file-agent" / "tmp" / "inbox-page-samples"),
+    )
+)
+PARSER_PLACEHOLDER_PREFIXES = (
+    "Document could not be parsed. Base64 content:",
+    "Image could not be parsed. Base64 content:",
+)
 
 
 def _normalize_path(path: str) -> str:
@@ -130,6 +149,95 @@ def _slugify(value: str) -> str:
 
 def _clean_space(value: str | None) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _extract_page_image_paths(value: str | None) -> list[str]:
+    text = value or ""
+    return re.findall(r"!\[[^\]]*\]\((/tmp/pdf-images/[^)]+)\)", text)
+
+
+def _sample_page_image_paths(paths: list[str], *, max_samples: int = 3) -> list[str]:
+    if len(paths) <= max_samples:
+        return paths
+    indexes = sorted({0, len(paths) // 2, len(paths) - 1})
+    return [paths[index] for index in indexes[:max_samples]]
+
+
+def _staging_dir_for_source(source_path: str) -> Path:
+    source_key = hashlib.sha1(source_path.encode("utf-8")).hexdigest()[:12]
+    destination_dir = FILE_AGENT_IMAGE_STAGING_DIR / source_key
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    return destination_dir
+
+
+def _stage_page_image_paths(page_image_paths: list[str], *, source_path: str) -> list[str]:
+    if not page_image_paths:
+        return []
+    destination_dir = _staging_dir_for_source(source_path)
+    staged: list[str] = []
+    for index, image_path in enumerate(page_image_paths):
+        source = Path(image_path)
+        if not source.exists():
+            continue
+        destination = destination_dir / f"page-{index}{source.suffix or '.png'}"
+        if source.resolve() == destination.resolve():
+            staged.append(str(destination))
+            continue
+        shutil.copy2(source, destination)
+        staged.append(str(destination))
+    return staged
+
+
+def _pdf_page_samples(raw_pdf: bytes, *, source_path: str, max_samples: int = 3) -> list[str]:
+    staging_dir = _staging_dir_for_source(source_path)
+    pdf_path = staging_dir / "source.pdf"
+    pdf_path.write_bytes(raw_pdf)
+
+    try:
+        completed = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        page_count = 1
+        if completed.returncode == 0:
+            match = re.search(r"^Pages:\s+(\d+)\s*$", completed.stdout, re.MULTILINE)
+            if match:
+                page_count = max(1, int(match.group(1)))
+    except Exception:
+        page_count = 1
+
+    pages = _sample_page_image_paths([str(index) for index in range(1, page_count + 1)], max_samples=max_samples)
+    rendered: list[str] = []
+    for page in pages:
+        page_number = int(page)
+        prefix = staging_dir / f"sample-page-{page_number}"
+        try:
+            subprocess.run(
+                [
+                    "pdftoppm",
+                    "-png",
+                    "-singlefile",
+                    "-f",
+                    str(page_number),
+                    "-l",
+                    str(page_number),
+                    str(pdf_path),
+                    str(prefix),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+        except Exception:
+            continue
+        image_path = prefix.with_suffix(".png")
+        if image_path.exists():
+            rendered.append(str(image_path))
+    return rendered
 
 
 def _looks_descriptive(stem: str) -> bool:
@@ -237,6 +345,7 @@ def infer_note_role(folder: str) -> str:
 @dataclass
 class FileAgentInboxDecision:
     folder: str
+    subfolder_path: str
     title: str
     filename_slug: str
     summary: str
@@ -244,6 +353,8 @@ class FileAgentInboxDecision:
     actions: list[str]
     open_questions: list[str]
     rewritten_markdown: str
+    high_level_category: str
+    sentiment: str
     confidence: float
     reason: str
 
@@ -348,8 +459,12 @@ def _file_agent_prompt(
     original_name: str,
     extension: str,
     content_type: str | None,
-    readable_text: str,
+    size_bytes: int,
+    extracted_text: str | None,
+    extracted_text_reliability: str,
+    page_image_paths: list[str],
     timestamp: datetime,
+    rewrite_eligible: bool,
 ) -> str:
     payload = {
         "source_path": path,
@@ -357,25 +472,83 @@ def _file_agent_prompt(
         "original_filename": original_name,
         "original_extension": extension,
         "content_type": content_type or "",
+        "size_bytes": size_bytes,
         "source_timestamp_utc": timestamp.astimezone(UTC).isoformat(),
-        "readable_text": readable_text[:FILE_AGENT_MAX_TEXT_CHARS],
+        "extracted_text": (extracted_text or "")[:FILE_AGENT_MAX_TEXT_CHARS],
+        "extracted_text_reliability": extracted_text_reliability,
+        "page_image_paths": page_image_paths[:3],
+        "rewrite_eligible": rewrite_eligible,
     }
     return (
-        "Analyze this inbox note for filing only. "
-        "Do not read or write files, do not call MCP tools, do not queue items, and do not perform any side effects. "
-        "Use only the note text included below.\n\n"
+        "Analyze this inbox file for filing only. "
+        "You may inspect the file at source_path with read-only MCP tools if available, "
+        "but do not write or move files, do not queue items, and do not perform any side effects. "
+        "Treat extracted_text as supplemental and potentially unreliable.\n\n"
         "Return exactly one JSON object with these keys:\n"
-        "folder, title, filename_slug, summary, key_insights, actions, open_questions, rewritten_markdown, confidence, reason.\n\n"
+        "folder, subfolder_path, title, filename_slug, summary, key_insights, actions, open_questions, rewritten_markdown, confidence, reason, high_level_category, sentiment.\n\n"
         "Rules:\n"
         "- folder must be one of Projects, Areas, Resources, Archive, Unfiled.\n"
+        "- subfolder_path must be a relative path under the chosen folder, never an absolute path.\n"
+        "- when folder is Projects, Areas, Resources, or Archive, subfolder_path should usually contain 1 to 3 stable human-readable segments like Church, School/Assignments/Valerie, Finance/Statements, or FamilyCloud/Docs.\n"
+        "- do not repeat the top-level folder name inside subfolder_path.\n"
+        "- use an empty string for subfolder_path only when folder is Unfiled or there is truly no confident subfolder.\n"
         "- filename_slug must be short, semantic, and durable. Do not include timestamps or file extensions.\n"
         "- summary must be meaningful prose, not a copied first sentence.\n"
         "- key_insights, actions, and open_questions must be short lists of strings.\n"
+        "- high_level_category must be a short top-level label like church, receipt, insurance, project, reference, media, or unknown.\n"
+        "- sentiment must be one of positive, neutral, negative, mixed, or unknown.\n"
+        "- Use the file itself as the primary object of analysis, not only extracted_text.\n"
+        "- If page_image_paths are provided, inspect a representative sample of those page images and use visual cues for classification when readable text is weak or missing.\n"
+        "- If extracted_text_reliability is low, do not invent facts from extracted text.\n"
         "- If the note is too ambiguous to classify confidently, use folder Unfiled and explain why.\n"
         "- Do not invent facts not present in the note.\n"
-        "- rewritten_markdown may be included, but the structured fields are the source of truth.\n\n"
+        "- rewritten_markdown may be included only as a suggested rewrite; return an empty string when rewrite_eligible is false or no rewrite is warranted.\n\n"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
     )
+
+
+def _format_subfolder_segment(value: str) -> str:
+    cleaned = _clean_space(value.replace("_", " "))
+    cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "", cleaned)
+    cleaned = cleaned.strip(" ./")
+    if not cleaned:
+        return ""
+    words: list[str] = []
+    for word in cleaned.split():
+        if any(char.isupper() for char in word) or any(char.isdigit() for char in word):
+            words.append(word)
+            continue
+        words.append("-".join(part.capitalize() for part in word.split("-")))
+    return " ".join(words)[:60].strip()
+
+
+def _fallback_subfolder_path(*, folder: str, high_level_category: str) -> str:
+    if folder == "Unfiled":
+        return ""
+    label_source = high_level_category.replace("_", " ").replace("-", " ")
+    label = _format_subfolder_segment(label_source)
+    if label and label.lower() != "unknown":
+        return label
+    return DEFAULT_SUBFOLDER_BY_FOLDER.get(folder, "General")
+
+
+def _normalize_subfolder_path(*, folder: str, subfolder_path: Any, high_level_category: str) -> str:
+    if folder == "Unfiled":
+        return ""
+    raw_value = str(subfolder_path or "").replace("\\", "/")
+    segments: list[str] = []
+    for raw_segment in raw_value.split("/"):
+        segment = _format_subfolder_segment(raw_segment)
+        if not segment:
+            continue
+        if segment.lower() == folder.lower() and not segments:
+            continue
+        segments.append(segment)
+        if len(segments) >= MAX_FILE_AGENT_SUBFOLDER_DEPTH:
+            break
+    if segments:
+        return "/".join(segments)
+    return _fallback_subfolder_path(folder=folder, high_level_category=high_level_category)
 
 
 def _parse_file_agent_result(raw: dict[str, Any], readable_text: str) -> FileAgentInboxDecision:
@@ -389,14 +562,28 @@ def _parse_file_agent_result(raw: dict[str, Any], readable_text: str) -> FileAge
     key_insights = _sanitize_lines(raw.get("key_insights"), fallback="No high-confidence insights were identified yet.")
     actions = _sanitize_lines(raw.get("actions"))
     open_questions = _sanitize_lines(raw.get("open_questions"))
-    rewritten_markdown = _build_structured_note_markdown(
-        title=title,
-        summary=summary,
-        key_insights=key_insights,
-        actions=actions,
-        open_questions=open_questions,
-        raw_note_content=readable_text,
+    rewritten_markdown_value = raw.get("rewritten_markdown")
+    rewritten_markdown = str(rewritten_markdown_value or "")
+    if rewritten_markdown.strip():
+        rewritten_markdown = rewritten_markdown if rewritten_markdown.endswith("\n") else rewritten_markdown + "\n"
+    else:
+        rewritten_markdown = _build_structured_note_markdown(
+            title=title,
+            summary=summary,
+            key_insights=key_insights,
+            actions=actions,
+            open_questions=open_questions,
+            raw_note_content=readable_text,
+        )
+    high_level_category = _slugify(_clean_space(str(raw.get("high_level_category") or "")) or "unknown").replace("-", "_")
+    subfolder_path = _normalize_subfolder_path(
+        folder=folder,
+        subfolder_path=raw.get("subfolder_path"),
+        high_level_category=high_level_category,
     )
+    sentiment = _clean_space(str(raw.get("sentiment") or "")).lower() or "unknown"
+    if sentiment not in {"positive", "neutral", "negative", "mixed", "unknown"}:
+        sentiment = "unknown"
     try:
         confidence = float(raw.get("confidence"))
     except Exception:
@@ -404,6 +591,7 @@ def _parse_file_agent_result(raw: dict[str, Any], readable_text: str) -> FileAge
     reason = _clean_space(str(raw.get("reason") or ""))[:280] or "file-agent-generated"
     return FileAgentInboxDecision(
         folder=folder,
+        subfolder_path=subfolder_path,
         title=title,
         filename_slug=filename_slug,
         summary=summary,
@@ -411,14 +599,36 @@ def _parse_file_agent_result(raw: dict[str, Any], readable_text: str) -> FileAge
         actions=actions,
         open_questions=open_questions,
         rewritten_markdown=rewritten_markdown,
+        high_level_category=high_level_category,
+        sentiment=sentiment,
         confidence=max(0.0, min(confidence, 0.99)),
         reason=reason,
     )
 
 
+def _extract_json_candidate_text(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    candidates = [stripped]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if 0 <= start < end:
+        candidates.append(stripped[start : end + 1])
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
 def _invoke_file_agent_json(*, prompt: str, timeout_seconds: int) -> dict[str, Any]:
+    openclaw_bin = os.environ.get("OPENCLAW_BIN", "openclaw").strip() or "openclaw"
     command = [
-        "openclaw",
+        openclaw_bin,
         "agent",
         "--agent",
         "file-agent",
@@ -438,10 +648,9 @@ def _invoke_file_agent_json(*, prompt: str, timeout_seconds: int) -> dict[str, A
         text = item.get("text")
         if not isinstance(text, str):
             continue
-        stripped = text.strip()
-        if not stripped:
-            continue
-        return json.loads(stripped)
+        decoded = _extract_json_candidate_text(text)
+        if decoded is not None:
+            return decoded
     raise RuntimeError("FileAgent returned no JSON payload")
 
 
@@ -449,9 +658,13 @@ def synthesize_note_with_file_agent(
     *,
     path: str,
     content_type: str | None,
-    readable_text: str,
+    size_bytes: int,
+    extracted_text: str | None,
+    extracted_text_reliability: str,
+    page_image_paths: list[str],
     timestamp: datetime,
     source_kind: str,
+    rewrite_eligible: bool,
 ) -> FileAgentInboxDecision:
     original_name = _base_name(path)
     _, extension = _split_name(original_name)
@@ -461,11 +674,15 @@ def synthesize_note_with_file_agent(
         original_name=original_name,
         extension=extension,
         content_type=content_type,
-        readable_text=readable_text,
+        size_bytes=size_bytes,
+        extracted_text=extracted_text,
+        extracted_text_reliability=extracted_text_reliability,
+        page_image_paths=page_image_paths,
         timestamp=timestamp,
+        rewrite_eligible=rewrite_eligible,
     )
     raw = _invoke_file_agent_json(prompt=prompt, timeout_seconds=FILE_AGENT_TIMEOUT_SECONDS)
-    return _parse_file_agent_result(raw, readable_text)
+    return _parse_file_agent_result(raw, extracted_text or "")
 
 
 @dataclass
@@ -608,36 +825,75 @@ class McpNextcloudClient:
             return
 
 
-def _decode_read_payload(payload: dict[str, Any], extension: str) -> tuple[str | None, bytes | None, str]:
+def _looks_like_parser_placeholder(text: str | None) -> bool:
+    candidate = (text or "").strip()
+    if not candidate:
+        return False
+    return candidate.startswith(PARSER_PLACEHOLDER_PREFIXES)
+
+
+def _looks_like_image_placeholder_markdown(text: str | None) -> bool:
+    candidate = (text or "").strip()
+    return candidate.startswith("![](/tmp/pdf-images/") or candidate.startswith("![image](/tmp/pdf-images/")
+
+
+def _decode_read_payload(payload: dict[str, Any], extension: str) -> tuple[str | None, bytes | None, str, str, list[str], int | None]:
     content_type = str(payload.get("content_type") or "")
+    size_value = payload.get("size")
+    try:
+        observed_size = int(size_value) if size_value is not None else None
+    except Exception:
+        observed_size = None
     content = payload.get("content")
     if not isinstance(content, str):
-        return None, None, content_type
+        return None, None, content_type, "missing", [], observed_size
     if payload.get("encoding") == "base64":
         raw = base64.b64decode(content)
-        return _extract_text_from_bytes(raw, content_type, extension), raw, content_type
-    return content.strip() or None, None, content_type
+        extracted = _extract_text_from_bytes(raw, content_type, extension)
+        reliability = "high" if extracted else "missing"
+        return extracted, raw, content_type, reliability, [], observed_size or len(raw)
+    extracted = content.strip() or None
+    page_image_paths = _sample_page_image_paths(_extract_page_image_paths(extracted))
+    reliability = "low" if (_looks_like_parser_placeholder(extracted) or _looks_like_image_placeholder_markdown(extracted)) else ("high" if extracted else "missing")
+    if reliability == "low":
+        extracted = None
+    return extracted, None, content_type, reliability, page_image_paths, observed_size
 
 
-async def _extract_readable_text(client: McpNextcloudClient, candidate: InboxCandidate) -> tuple[str | None, str]:
+async def _extract_readable_text(client: McpNextcloudClient, candidate: InboxCandidate) -> tuple[str | None, str, str, list[str], int | None]:
     _, extension = _split_name(candidate.name)
     content_type = candidate.content_type
     try:
         payload = await client.read_file(candidate.path)
-        readable_text, _, parsed_content_type = _decode_read_payload(payload, extension)
+        readable_text, _, parsed_content_type, reliability, page_image_paths, observed_size = _decode_read_payload(payload, extension)
         if parsed_content_type:
             content_type = parsed_content_type
-        if readable_text:
-            return readable_text, content_type
+        if readable_text or reliability == "low":
+            if extension == ".pdf" and reliability == "low":
+                try:
+                    raw_payload = await client.read_raw_file(candidate.path)
+                    raw_bytes = base64.b64decode(str(raw_payload.get("content") or ""))
+                    content_type = str(raw_payload.get("content_type") or content_type)
+                    page_image_paths = _pdf_page_samples(raw_bytes, source_path=candidate.path) or page_image_paths
+                    observed_size = observed_size or len(raw_bytes)
+                except Exception:
+                    pass
+            return readable_text, content_type, reliability, page_image_paths, observed_size
     except Exception:
         pass
     try:
         raw_payload = await client.read_raw_file(candidate.path)
         raw_bytes = base64.b64decode(str(raw_payload.get("content") or ""))
         content_type = str(raw_payload.get("content_type") or content_type)
-        return _extract_text_from_bytes(raw_bytes, content_type, extension), content_type
+        readable_text = _extract_text_from_bytes(raw_bytes, content_type, extension)
+        return readable_text, content_type, "high" if readable_text else "missing", [], len(raw_bytes)
     except Exception:
-        return None, content_type
+        return None, content_type, "missing", [], None
+
+
+def _rewrite_eligible(candidate: InboxCandidate) -> bool:
+    _, extension = _split_name(candidate.name)
+    return extension in NOTE_EXTENSIONS and HOME_DASHBOARD_DOC_RE.match(candidate.name) is not None
 
 
 def _build_nextcloud_url(base_url: str, path: str) -> str:
@@ -742,29 +998,79 @@ def _as_file_entry(item: dict[str, Any]) -> InboxCandidate | None:
     )
 
 
+def _candidate_sort_key(candidate: InboxCandidate) -> tuple[str, str]:
+    return (_parse_timestamp(candidate.last_modified).isoformat(), candidate.path)
+
+
+def _ordered_candidates(candidates: list[InboxCandidate]) -> list[InboxCandidate]:
+    return sorted(candidates, key=_candidate_sort_key)
+
+
 async def discover_candidates(
     client: McpNextcloudClient,
     *,
     ready_tag: str,
     include_dashboard_docs: bool,
     idle_minutes: int,
+    candidate_mode: str = "ready-tagged",
 ) -> tuple[list[InboxCandidate], int, int]:
     try:
         ready_candidates = await client.list_ready_files("/Notes/Inbox", ready_tag)
     except Exception as exc:
         logger.warning("ready_tag_lookup_failed scope=/Notes/Inbox tag=%s error=%s", ready_tag, exc)
         ready_candidates = []
-    by_path = {item.path: item for item in ready_candidates}
+    ready_by_path = {item.path: item for item in ready_candidates}
     skipped_locked = 0
     skipped_recent = 0
     entries = await client.list_directory("/Notes/Inbox")
+    entry_by_path: dict[str, InboxCandidate] = {}
     for item in entries:
         entry = _as_file_entry(item)
         if entry is None:
             continue
-        existing = by_path.get(entry.path)
+        entry_by_path[entry.path] = entry
+        existing = ready_by_path.get(entry.path)
         if existing is not None and entry.lock_owner:
             existing.lock_owner = entry.lock_owner
+        if existing is not None:
+            existing.name = entry.name or existing.name
+            existing.size = entry.size or existing.size
+            existing.content_type = entry.content_type or existing.content_type
+            existing.last_modified = entry.last_modified or existing.last_modified
+            existing.etag = entry.etag or existing.etag
+            existing.file_id = entry.file_id or existing.file_id
+    if candidate_mode == "closed-inbox":
+        cutoff = datetime.now(UTC) - timedelta(minutes=max(1, idle_minutes)) if idle_minutes > 0 else None
+        candidates: list[InboxCandidate] = []
+        for entry in entry_by_path.values():
+            if entry.lock_owner:
+                skipped_locked += 1
+                continue
+            is_dashboard_doc = HOME_DASHBOARD_DOC_RE.match(entry.name) is not None
+            if is_dashboard_doc and not include_dashboard_docs:
+                continue
+            if entry.size <= 0:
+                skipped_recent += 1
+                continue
+            modified_at = _parse_timestamp(entry.last_modified)
+            if cutoff is not None and modified_at > cutoff:
+                skipped_recent += 1
+                continue
+            ready_entry = ready_by_path.get(entry.path)
+            if ready_entry is not None:
+                ready_entry.lock_owner = entry.lock_owner
+                ready_entry.name = entry.name or ready_entry.name
+                ready_entry.size = entry.size or ready_entry.size
+                ready_entry.content_type = entry.content_type or ready_entry.content_type
+                ready_entry.last_modified = entry.last_modified or ready_entry.last_modified
+                ready_entry.etag = entry.etag or ready_entry.etag
+                ready_entry.file_id = entry.file_id or ready_entry.file_id
+                candidates.append(ready_entry)
+                continue
+            entry.source_kind = "dashboard-doc" if is_dashboard_doc else "closed-inbox"
+            candidates.append(entry)
+        return candidates, skipped_locked, skipped_recent
+    by_path = dict(ready_by_path)
     for path, item in list(by_path.items()):
         if item.lock_owner:
             skipped_locked += 1
@@ -832,6 +1138,18 @@ def _verify_for_url(url: str) -> bool:
     return not url.startswith("https://")
 
 
+def _destination_directory(*, folder: str, high_level_category: str, subfolder_path: str = "") -> str:
+    base = f"/Notes/{folder}"
+    relative = _normalize_subfolder_path(
+        folder=folder,
+        subfolder_path=subfolder_path,
+        high_level_category=high_level_category,
+    )
+    if not relative:
+        return base
+    return f"{base}/{relative}"
+
+
 def _index_document(
     *,
     decision_api_base_url: str,
@@ -850,25 +1168,35 @@ def _index_document(
     summary: str | None,
     key_insights: list[str],
     source_kind: str,
+    high_level_category: str,
+    sentiment: str,
 ) -> bool:
     _, ext = _split_name(destination_path)
+    tags = ["ready-processed", folder.lower(), source_kind]
+    if high_level_category and high_level_category != "unknown" and high_level_category not in tags:
+        tags.append(high_level_category)
+    metadata = {
+        "source_path": candidate.path,
+        "destination_folder": folder,
+        "source_file_id": candidate.file_id,
+        "file_agent": "shared_inbox_processor",
+        "confidence": confidence,
+        "filing_reason": reason,
+        "source_kind": source_kind,
+        "high_level_category": high_level_category,
+        "sentiment": sentiment,
+    }
+    if high_level_category == "church":
+        metadata["note_type"] = "church"
     payload_base = {
         "family_id": family_id,
         "actor": actor,
         "source_session_id": "nextcloud-file-agent",
         "path": destination_path,
-        "tags": ["ready-processed", folder.lower(), source_kind],
+        "tags": tags,
         "nextcloud_url": nextcloud_url,
         "related_paths": [candidate.path],
-        "metadata": {
-            "source_path": candidate.path,
-            "destination_folder": folder,
-            "source_file_id": candidate.file_id,
-            "file_agent": "shared_inbox_processor",
-            "confidence": confidence,
-            "filing_reason": reason,
-            "source_kind": source_kind,
-        },
+        "metadata": metadata,
     }
     try:
         with httpx.Client(timeout=30.0, verify=_verify_for_url(decision_api_base_url)) as client:
@@ -910,21 +1238,16 @@ def _index_document(
                     },
                 )
             response.raise_for_status()
-            if summary and confidence >= 0.7 and infer_file_item_type(content_type, ext, readable_text) in {"note", "document"}:
-                client.post(
-                    f"{decision_api_base_url.rstrip('/')}/family/{family_id}/memory/documents",
-                    headers=_http_headers(actor),
-                    json={
-                        "family_id": family_id,
-                        "type": "note",
-                        "text": _memory_text(title, summary, destination_path, nextcloud_url, key_insights),
-                        "owner_person_id": None,
-                        "visibility_scope": "family",
-                        "source_refs": [_source_ref(title, destination_path, nextcloud_url)],
-                    },
-                ).raise_for_status()
             return True
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "file_inbox_index_failed actor=%s path=%s destination=%s folder=%s error=%s",
+            actor,
+            candidate.path,
+            destination_path,
+            folder,
+            exc,
+        )
         return False
 
 
@@ -943,33 +1266,48 @@ def _create_file_question(
     question_api_base_url = os.environ.get("QUESTION_API_BASE_URL", decision_api_base_url).rstrip("/")
     try:
         with httpx.Client(timeout=20.0, verify=_verify_for_url(question_api_base_url)) as client:
+            payload = {
+                "domain": "file",
+                "source_agent": "FileAgent",
+                "topic": f"Needs filing review: {title}",
+                "summary": "Low-confidence inbox filing result needs a human check.",
+                "prompt": (
+                    f"FileAgent moved `{candidate.path}` to `{destination_path}` with low confidence "
+                    f"({confidence:.2f}). Reason: {reason}. Please confirm the final destination."
+                ),
+                "urgency": "medium",
+                "category": "filing_review",
+                "topic_type": "filing_review",
+                "answer_sufficiency_state": "needed",
+                "dedupe_key": f"file-filing-review:{destination_path}",
+                "context": {
+                    "source_path": candidate.path,
+                    "destination_path": destination_path,
+                    "file_id": candidate.file_id,
+                    "confidence": confidence,
+                    "reason": reason,
+                    "nextcloud_url": nextcloud_url,
+                },
+                "artifact_refs": [{"type": "file", "path": destination_path}],
+            }
+            try:
+                client.post(
+                    f"{decision_api_base_url.rstrip('/')}/families/{family_id}/jobs/followups",
+                    headers=_http_headers(actor),
+                    json={
+                        "actor": actor,
+                        "job_type": "create_question",
+                        "dedupe_key": f"file-filing-review:{destination_path}",
+                        "payload": payload,
+                    },
+                ).raise_for_status()
+                return
+            except Exception:
+                pass
             client.post(
                 f"{question_api_base_url}/families/{family_id}/questions",
                 headers=_http_headers(actor),
-                json={
-                    "domain": "file",
-                    "source_agent": "FileAgent",
-                    "topic": f"Needs filing review: {title}",
-                    "summary": "Low-confidence inbox filing result needs a human check.",
-                    "prompt": (
-                        f"FileAgent moved `{candidate.path}` to `{destination_path}` with low confidence "
-                        f"({confidence:.2f}). Reason: {reason}. Please confirm the final destination."
-                    ),
-                    "urgency": "medium",
-                    "category": "filing_review",
-                    "topic_type": "filing_review",
-                    "answer_sufficiency_state": "needed",
-                    "dedupe_key": f"file-filing-review:{destination_path}",
-                    "context": {
-                        "source_path": candidate.path,
-                        "destination_path": destination_path,
-                        "file_id": candidate.file_id,
-                        "confidence": confidence,
-                        "reason": reason,
-                        "nextcloud_url": nextcloud_url,
-                    },
-                    "artifact_refs": [{"type": "file", "path": destination_path}],
-                },
+                json=payload,
             ).raise_for_status()
     except Exception:
         return
@@ -991,27 +1329,42 @@ def _create_file_open_questions(
     prompt = " ".join(f"{index + 1}. {item}" for index, item in enumerate(open_questions[:3]))
     try:
         with httpx.Client(timeout=20.0, verify=_verify_for_url(question_api_base_url)) as client:
+            payload = {
+                "domain": "file",
+                "source_agent": "FileAgent",
+                "topic": f"Follow-up for filed note: {title}",
+                "summary": "FileAgent found unresolved follow-up questions in a filed note.",
+                "prompt": prompt,
+                "urgency": "medium",
+                "category": "file_followup",
+                "topic_type": "file_followup",
+                "answer_sufficiency_state": "needed",
+                "dedupe_key": f"file-followup:{destination_path}",
+                "context": {
+                    "destination_path": destination_path,
+                    "nextcloud_url": nextcloud_url,
+                    "open_questions": open_questions[:5],
+                },
+                "artifact_refs": [{"type": "file", "path": destination_path}],
+            }
+            try:
+                client.post(
+                    f"{decision_api_base_url.rstrip('/')}/families/{family_id}/jobs/followups",
+                    headers=_http_headers(actor),
+                    json={
+                        "actor": actor,
+                        "job_type": "create_question",
+                        "dedupe_key": f"file-followup:{destination_path}",
+                        "payload": payload,
+                    },
+                ).raise_for_status()
+                return
+            except Exception:
+                pass
             client.post(
                 f"{question_api_base_url}/families/{family_id}/questions",
                 headers=_http_headers(actor),
-                json={
-                    "domain": "file",
-                    "source_agent": "FileAgent",
-                    "topic": f"Follow-up for filed note: {title}",
-                    "summary": "FileAgent found unresolved follow-up questions in a filed note.",
-                    "prompt": prompt,
-                    "urgency": "medium",
-                    "category": "file_followup",
-                    "topic_type": "file_followup",
-                    "answer_sufficiency_state": "needed",
-                    "dedupe_key": f"file-followup:{destination_path}",
-                    "context": {
-                        "destination_path": destination_path,
-                        "nextcloud_url": nextcloud_url,
-                        "open_questions": open_questions[:5],
-                    },
-                    "artifact_refs": [{"type": "file", "path": destination_path}],
-                },
+                json=payload,
             ).raise_for_status()
     except Exception:
         return
@@ -1036,9 +1389,44 @@ async def process_inbox_async(
     include_dashboard_docs: bool = True,
     dashboard_idle_minutes: int = 10,
     confidence_threshold: float = 0.7,
+    candidate_mode: str = "closed-inbox",
+    max_candidates: int | None = None,
+) -> dict[str, Any]:
+    return await _process_candidates_async(
+        mcp_url=mcp_url,
+        ready_tag=ready_tag,
+        decision_api_base_url=decision_api_base_url,
+        actor=actor,
+        family_id=family_id,
+        nextcloud_base_url=nextcloud_base_url,
+        include_dashboard_docs=include_dashboard_docs,
+        dashboard_idle_minutes=dashboard_idle_minutes,
+        confidence_threshold=confidence_threshold,
+        candidate_mode=candidate_mode,
+        candidates=None,
+        max_candidates=max_candidates,
+    )
+
+
+async def _process_candidates_async(
+    *,
+    mcp_url: str,
+    ready_tag: str,
+    decision_api_base_url: str,
+    actor: str,
+    family_id: int,
+    nextcloud_base_url: str | None,
+    include_dashboard_docs: bool,
+    dashboard_idle_minutes: int,
+    confidence_threshold: float,
+    candidate_mode: str,
+    candidates: list[InboxCandidate] | None,
+    max_candidates: int | None,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "status": "completed",
+        "discovered": 0,
+        "deferred": 0,
         "processed": 0,
         "indexed": 0,
         "unfiled": 0,
@@ -1051,67 +1439,95 @@ async def process_inbox_async(
     async with McpNextcloudClient(mcp_url) as client:
         for folder in CANONICAL_FOLDERS:
             await _ensure_directory(client, f"/Notes/{folder}")
-        candidates, skipped_locked, skipped_recent = await discover_candidates(
-            client,
-            ready_tag=ready_tag,
-            include_dashboard_docs=include_dashboard_docs,
-            idle_minutes=dashboard_idle_minutes,
-        )
-        summary["skipped_locked"] = skipped_locked
-        summary["skipped_recent"] = skipped_recent
-        for candidate in candidates:
-            readable_text, content_type = await _extract_readable_text(client, candidate)
+        active_candidates = candidates
+        if active_candidates is None:
+            active_candidates, skipped_locked, skipped_recent = await discover_candidates(
+                client,
+                ready_tag=ready_tag,
+                include_dashboard_docs=include_dashboard_docs,
+                idle_minutes=dashboard_idle_minutes,
+                candidate_mode=candidate_mode,
+            )
+            summary["skipped_locked"] = skipped_locked
+            summary["skipped_recent"] = skipped_recent
+        active_candidates = _ordered_candidates(active_candidates)
+        summary["discovered"] = len(active_candidates)
+        effective_max_candidates = max_candidates if isinstance(max_candidates, int) and max_candidates > 0 else None
+        if effective_max_candidates is not None and len(active_candidates) > effective_max_candidates:
+            summary["deferred"] = len(active_candidates) - effective_max_candidates
+            active_candidates = active_candidates[:effective_max_candidates]
+        for candidate in active_candidates:
+            readable_text, content_type, extracted_text_reliability, page_image_paths, observed_size = await _extract_readable_text(client, candidate)
             timestamp = _parse_timestamp(candidate.last_modified)
-            decision = derive_filing_decision(
+            fallback_decision = derive_filing_decision(
                 path=candidate.path,
                 content_type=content_type,
                 readable_text=readable_text,
                 timestamp=timestamp,
                 source_kind=candidate.source_kind,
             )
+            decision = fallback_decision
             rewritten_content: str | None = None
             summary_text: str | None = None
             key_insights: list[str] = []
             open_questions: list[str] = []
-            if readable_text and infer_file_item_type(content_type, _split_name(candidate.name)[1], readable_text) in {"note", "document"}:
-                try:
-                    ai_decision = synthesize_note_with_file_agent(
-                        path=candidate.path,
-                        content_type=content_type,
-                        readable_text=readable_text,
-                        timestamp=timestamp,
-                        source_kind=candidate.source_kind,
-                    )
-                    filename = f"{timestamp.astimezone(UTC).strftime('%Y-%m-%d_%H%M%S')}_{ai_decision.filename_slug}{_split_name(candidate.name)[1]}"
-                    decision = {
-                        "folder": ai_decision.folder,
-                        "filename": filename,
-                        "title": ai_decision.title,
-                        "readable": True,
-                        "descriptive_name": True,
-                        "confidence": ai_decision.confidence,
-                        "reason": ai_decision.reason,
-                    }
+            high_level_category = "unknown"
+            sentiment = "unknown"
+            try:
+                ai_decision = synthesize_note_with_file_agent(
+                    path=candidate.path,
+                    content_type=content_type,
+                    size_bytes=observed_size or candidate.size,
+                    extracted_text=readable_text,
+                    extracted_text_reliability=extracted_text_reliability,
+                    page_image_paths=_stage_page_image_paths(page_image_paths, source_path=candidate.path),
+                    timestamp=timestamp,
+                    source_kind=candidate.source_kind,
+                    rewrite_eligible=_rewrite_eligible(candidate),
+                )
+                filename = f"{timestamp.astimezone(UTC).strftime('%Y-%m-%d_%H%M%S')}_{ai_decision.filename_slug}{_split_name(candidate.name)[1]}"
+                decision = {
+                    "folder": ai_decision.folder,
+                    "subfolder_path": ai_decision.subfolder_path,
+                    "filename": filename,
+                    "title": ai_decision.title,
+                    "readable": bool(readable_text),
+                    "descriptive_name": True,
+                    "confidence": ai_decision.confidence,
+                    "reason": ai_decision.reason,
+                }
+                if _rewrite_eligible(candidate) and ai_decision.rewritten_markdown:
                     rewritten_content = ai_decision.rewritten_markdown
-                    summary_text = ai_decision.summary
-                    key_insights = ai_decision.key_insights
-                    open_questions = ai_decision.open_questions
-                except Exception as exc:
-                    logger.warning("file_agent_note_synthesis_failed path=%s error=%s", candidate.path, exc)
-                    fallback_title = _extract_title(readable_text, _split_name(candidate.name)[0] or "captured-note")
-                    decision = {
-                        "folder": "Unfiled",
-                        "filename": f"{timestamp.astimezone(UTC).strftime('%Y-%m-%d_%H%M%S')}_{_slugify(fallback_title)}{_split_name(candidate.name)[1]}",
-                        "title": fallback_title,
-                        "readable": True,
-                        "descriptive_name": True,
-                        "confidence": 0.2,
-                        "reason": "file-agent-synthesis-failed",
-                    }
+                summary_text = ai_decision.summary
+                key_insights = ai_decision.key_insights
+                open_questions = ai_decision.open_questions
+                high_level_category = ai_decision.high_level_category
+                sentiment = ai_decision.sentiment
+            except Exception as exc:
+                logger.warning("file_agent_file_synthesis_failed path=%s error=%s", candidate.path, exc)
+                fallback_title = _extract_title(readable_text, _split_name(candidate.name)[0] or "captured-file")
+                decision = {
+                    "folder": "Unfiled",
+                    "subfolder_path": "",
+                    "filename": f"{timestamp.astimezone(UTC).strftime('%Y-%m-%d_%H%M%S')}_{_slugify(fallback_title)}{_split_name(candidate.name)[1]}",
+                    "title": fallback_title,
+                    "readable": bool(readable_text),
+                    "descriptive_name": bool(fallback_decision.get("descriptive_name")),
+                    "confidence": 0.2,
+                    "reason": "file-agent-synthesis-failed",
+                }
+                high_level_category = "unknown"
+                sentiment = "unknown"
             folder = str(decision["folder"])
             if float(decision["confidence"]) < confidence_threshold:
                 folder = "Unfiled"
-            destination = await _unique_destination(client, f"/Notes/{folder}/{decision['filename']}")
+            destination_dir = _destination_directory(
+                folder=folder,
+                high_level_category=high_level_category,
+                subfolder_path=str(decision.get("subfolder_path") or ""),
+            )
+            await _ensure_directory(client, destination_dir)
+            destination = await _unique_destination(client, f"{destination_dir}/{decision['filename']}")
             try:
                 await client.move_resource(candidate.path, destination)
             except FileExistsError:
@@ -1119,7 +1535,8 @@ async def process_inbox_async(
                 continue
             if rewritten_content:
                 await client.write_file(destination, rewritten_content, content_type="text/markdown")
-            await client.remove_tag_from_file(candidate.file_id, ready_tag)
+            if candidate.source_kind == "ready-tag":
+                await client.remove_tag_from_file(candidate.file_id, ready_tag)
             nextcloud_url = _build_nextcloud_url(nextcloud_url_base, destination)
             indexed = _index_document(
                 decision_api_base_url=decision_api_base_url,
@@ -1138,6 +1555,8 @@ async def process_inbox_async(
                 summary=summary_text,
                 key_insights=key_insights,
                 source_kind=candidate.source_kind,
+                high_level_category=high_level_category,
+                sentiment=sentiment,
             )
             if folder == "Unfiled":
                 _create_file_question(
@@ -1183,3 +1602,61 @@ async def process_inbox_async(
 
 def run_process_inbox(**kwargs: Any) -> dict[str, Any]:
     return asyncio.run(process_inbox_async(**kwargs))
+
+
+async def replay_unfiled_to_inbox_async(
+    *,
+    mcp_url: str,
+    ready_tag: str = "ready",
+    decision_api_base_url: str,
+    actor: str,
+    family_id: int,
+    nextcloud_base_url: str | None = None,
+    include_dashboard_docs: bool = False,
+    dashboard_idle_minutes: int = 10,
+    confidence_threshold: float = 0.7,
+    source_path: str = "/Notes/Unfiled",
+    target_path: str = "/Notes/Inbox",
+    max_candidates: int | None = None,
+) -> dict[str, Any]:
+    moved: list[dict[str, str]] = []
+    replay_candidates: list[InboxCandidate] = []
+    async with McpNextcloudClient(mcp_url) as client:
+        await _ensure_directory(client, target_path)
+        for item in await client.list_directory(source_path):
+            entry = _as_file_entry(item)
+            if entry is None:
+                continue
+            if entry.name.startswith(".attachments."):
+                continue
+            destination = await _unique_destination(client, f"{target_path}/{entry.name}")
+            await client.move_resource(entry.path, destination)
+            moved.append({"source_path": entry.path, "destination_path": destination})
+            replay_candidates.append(
+                InboxCandidate(
+                    path=destination,
+                    name=_base_name(destination),
+                    size=entry.size,
+                    content_type=entry.content_type,
+                    last_modified=entry.last_modified,
+                    etag=entry.etag,
+                    file_id=entry.file_id,
+                    lock_owner=entry.lock_owner,
+                    source_kind="replay-unfiled",
+                )
+            )
+    process_summary = await _process_candidates_async(
+        mcp_url=mcp_url,
+        ready_tag=ready_tag,
+        decision_api_base_url=decision_api_base_url,
+        actor=actor,
+        family_id=family_id,
+        nextcloud_base_url=nextcloud_base_url,
+        include_dashboard_docs=include_dashboard_docs,
+        dashboard_idle_minutes=dashboard_idle_minutes,
+        confidence_threshold=confidence_threshold,
+        candidate_mode="closed-inbox",
+        candidates=replay_candidates,
+        max_candidates=max_candidates,
+    )
+    return {"moved": len(moved), "results": moved, "process_summary": process_summary}

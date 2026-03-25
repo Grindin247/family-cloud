@@ -11,8 +11,14 @@ SUBJECT_BY_DOMAIN: dict[AllowedDomain, str] = {
     "education": "family.events.education",
     "profile": "family.events.profile",
     "planning": "family.events.planning",
+    "question": "family.events.question",
+    "family": "family.events.family",
 }
 
 
 def subject_for_domain(domain: AllowedDomain) -> str:
     return SUBJECT_BY_DOMAIN[domain]
+
+
+def canonical_subjects() -> list[str]:
+    return sorted(set(SUBJECT_BY_DOMAIN.values()))

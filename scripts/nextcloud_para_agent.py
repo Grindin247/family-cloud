@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import base64
 import json
+import logging
 import os
 import posixpath
 import re
@@ -20,6 +21,8 @@ from urllib.parse import quote
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -28,6 +31,7 @@ from agents.common.file_inbox import (
     derive_filing_decision as shared_derive_filing_decision,
     infer_file_item_type as shared_infer_file_item_type,
     process_inbox_async as shared_process_inbox_async,
+    replay_unfiled_to_inbox_async as shared_replay_unfiled_to_inbox_async,
 )
 
 
@@ -110,6 +114,7 @@ RESOURCE_KEYWORDS = {
     "howto",
 }
 WEBDAV_NS = {"d": "DAV:", "oc": "http://owncloud.org/ns"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _normalize_path(path: str) -> str:
@@ -217,6 +222,17 @@ def infer_note_role(folder: str) -> str:
     if folder == "Archive":
         return "archive"
     return "polished"
+
+
+def _default_max_files_per_run() -> int | None:
+    raw = (os.environ.get("FILE_AGENT_MAX_FILES_PER_RUN") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 @dataclass
@@ -556,6 +572,112 @@ def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
 
 
 @lru_cache(maxsize=1)
+def _load_identity_registry() -> dict[str, Any]:
+    registry_path = Path.home() / ".openclaw" / "family-identity.json"
+    if not registry_path.exists():
+        return {}
+    try:
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(EMAIL_RE.match((value or "").strip()))
+
+
+def _default_family_id() -> int:
+    repo_env = _load_repo_env()
+    raw = (
+        os.environ.get("FILE_AGENT_FAMILY_ID")
+        or repo_env.get("FILE_AGENT_FAMILY_ID")
+        or "2"
+    ).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 2
+
+
+def _resolve_actor_alias(candidate: str, *, family_id: int | None = None) -> str:
+    token = (candidate or "").strip().lower()
+    if not token:
+        return ""
+    if _looks_like_email(token):
+        return token
+    registry = _load_identity_registry()
+    families = registry.get("families")
+    if not isinstance(families, list):
+        return ""
+    preferred_family_id = family_id if isinstance(family_id, int) else None
+    family_rows = families
+    if preferred_family_id is not None:
+        matching = [row for row in families if isinstance(row, dict) and row.get("family_id") == preferred_family_id]
+        if matching:
+            family_rows = matching
+    for family in family_rows:
+        if not isinstance(family, dict):
+            continue
+        for person in family.get("persons") or []:
+            if not isinstance(person, dict):
+                continue
+            if str(person.get("status") or "active").lower() != "active":
+                continue
+            candidates: set[str] = set()
+            for field in ("canonical_name", "display_name"):
+                value = str(person.get(field) or "").strip().lower()
+                if value:
+                    candidates.add(value)
+            for alias in person.get("aliases") or []:
+                value = str(alias or "").strip().lower()
+                if value:
+                    candidates.add(value)
+            accounts = person.get("accounts") or {}
+            if isinstance(accounts, dict):
+                for values in accounts.values():
+                    for value in values or []:
+                        text = str(value or "").strip().lower()
+                        if text:
+                            candidates.add(text)
+            if token not in candidates:
+                continue
+            accounts = person.get("accounts") or {}
+            if isinstance(accounts, dict):
+                for email in accounts.get("email") or []:
+                    normalized = str(email or "").strip().lower()
+                    if _looks_like_email(normalized):
+                        return normalized
+    return ""
+
+
+def _default_actor() -> str:
+    repo_env = _load_repo_env()
+    family_id = _default_family_id()
+    for key in (
+        "FILE_AGENT_ACTOR",
+        "HOME_PORTAL_FILE_AGENT_ACTOR",
+        "NEXTCLOUD_AUTOMATION_USERNAME",
+        "NEXTCLOUD_USERNAME",
+    ):
+        explicit = (os.environ.get(key) or repo_env.get(key) or "").strip()
+        if not explicit:
+            continue
+        resolved = _resolve_actor_alias(explicit, family_id=family_id)
+        if resolved:
+            return resolved
+        if key in {"FILE_AGENT_ACTOR", "HOME_PORTAL_FILE_AGENT_ACTOR"}:
+            logger.warning("file_agent_actor_unresolved source=%s value=%s", key, explicit)
+    root = Path(__file__).resolve().parents[1]
+    username_file = root / "secrets" / "nextcloud_mcp_username"
+    if username_file.exists():
+        resolved = _resolve_actor_alias(username_file.read_text(encoding="utf-8").strip(), family_id=family_id)
+        if resolved:
+            return resolved
+    return ""
+
+
+@lru_cache(maxsize=1)
 def _load_repo_env() -> dict[str, str]:
     root = Path(__file__).resolve().parents[1]
     env_file = root / ".env"
@@ -608,6 +730,41 @@ def _default_base_url() -> str:
     if family_domain:
         return f"https://nextcloud.{family_domain}"
     return "https://nextcloud.local"
+
+
+def _default_file_api_base_url() -> str:
+    explicit = (os.environ.get("FILE_API_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    repo_env = _load_repo_env()
+    explicit = (repo_env.get("FILE_API_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    local_port = (
+        os.environ.get("FILE_API_PORT")
+        or repo_env.get("FILE_API_PORT")
+        or "8070"
+    ).strip()
+    if local_port.isdigit():
+        return f"http://127.0.0.1:{local_port}/v1"
+    explicit = (os.environ.get("DECISION_API_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    explicit = (repo_env.get("DECISION_API_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    decision_port = (
+        os.environ.get("DECISION_API_PORT")
+        or repo_env.get("DECISION_API_PORT")
+        or "8011"
+    ).strip()
+    if decision_port.isdigit():
+        return f"http://127.0.0.1:{decision_port}/v1"
+    return "http://127.0.0.1:8070/v1"
+
+
+def _default_decision_api_base_url() -> str:
+    return _default_file_api_base_url()
 
 
 def _build_nextcloud_url(base_url: str, path: str) -> str:
@@ -704,17 +861,43 @@ def index_document(
 
 
 async def process_ready_files_async(args: argparse.Namespace) -> dict[str, Any]:
+    actor = (args.actor or _default_actor()).strip()
     return await shared_process_inbox_async(
         mcp_url=args.mcp_url,
         ready_tag=args.ready_tag,
-        decision_api_base_url=args.decision_api_base_url,
-        actor=args.actor,
+        decision_api_base_url=args.file_api_base_url,
+        actor=actor,
         family_id=args.family_id,
         nextcloud_base_url=args.base_url,
         include_dashboard_docs=True,
         dashboard_idle_minutes=int(os.environ.get("FILE_AGENT_NEW_DOC_IDLE_MINUTES", "10")),
         confidence_threshold=float(os.environ.get("FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD", "0.70")),
+        candidate_mode="ready-tagged",
+        max_candidates=args.max_files,
     )
+
+
+async def replay_unfiled_async(args: argparse.Namespace) -> dict[str, Any]:
+    actor = (args.actor or _default_actor()).strip()
+    replay_summary = await shared_replay_unfiled_to_inbox_async(
+        mcp_url=args.mcp_url,
+        ready_tag=args.ready_tag,
+        decision_api_base_url=args.file_api_base_url,
+        actor=actor,
+        family_id=args.family_id,
+        nextcloud_base_url=args.base_url,
+        include_dashboard_docs=False,
+        dashboard_idle_minutes=int(os.environ.get("FILE_AGENT_NEW_DOC_IDLE_MINUTES", "10")),
+        confidence_threshold=float(os.environ.get("FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD", "0.70")),
+        source_path="/Notes/Unfiled",
+        target_path="/Notes/Inbox",
+        max_candidates=args.max_files,
+    )
+    return {
+        "replayed": replay_summary["moved"],
+        "replay_results": replay_summary["results"],
+        "process_summary": replay_summary["process_summary"],
+    }
 
 
 def _collect_migration_moves(client: NextcloudAutomationClient, source_root: str) -> tuple[list[tuple[str, str]], list[str], list[str]]:
@@ -786,14 +969,43 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser.add_argument("--family-id", type=int, default=int(os.environ.get("FILE_AGENT_FAMILY_ID", "2")))
     process_parser.add_argument(
         "--actor",
-        default=os.environ.get("FILE_AGENT_ACTOR") or os.environ.get("NEXTCLOUD_USERNAME", ""),
+        default=_default_actor(),
+    )
+    process_parser.add_argument(
+        "--file-api-base-url",
+        dest="file_api_base_url",
+        default=_default_file_api_base_url(),
     )
     process_parser.add_argument(
         "--decision-api-base-url",
-        default=os.environ.get("DECISION_API_BASE_URL")
-        or (f"https://decision.{_load_repo_env().get('FAMILY_DOMAIN', '').strip()}/api/v1" if _load_repo_env().get("FAMILY_DOMAIN") else "http://127.0.0.1:8010/v1"),
+        dest="file_api_base_url",
+        help=argparse.SUPPRESS,
     )
+    process_parser.add_argument("--max-files", type=int, default=_default_max_files_per_run())
     process_parser.add_argument("--summary-json", action="store_true")
+
+    replay_parser = subparsers.add_parser(
+        "replay-unfiled",
+        help="Move files from /Notes/Unfiled back to /Notes/Inbox and process them.",
+    )
+    replay_parser.add_argument("--ready-tag", default=os.environ.get("NEXTCLOUD_READY_TAG_NAME", "ready"))
+    replay_parser.add_argument("--family-id", type=int, default=int(os.environ.get("FILE_AGENT_FAMILY_ID", "2")))
+    replay_parser.add_argument(
+        "--actor",
+        default=_default_actor(),
+    )
+    replay_parser.add_argument(
+        "--file-api-base-url",
+        dest="file_api_base_url",
+        default=_default_file_api_base_url(),
+    )
+    replay_parser.add_argument(
+        "--decision-api-base-url",
+        dest="file_api_base_url",
+        help=argparse.SUPPRESS,
+    )
+    replay_parser.add_argument("--max-files", type=int, default=_default_max_files_per_run())
+    replay_parser.add_argument("--summary-json", action="store_true")
 
     migrate_parser = subparsers.add_parser("migrate-familycloud", help="Move /Notes/FamilyCloud contents into /Notes.")
     migrate_parser.add_argument("--summary-json", action="store_true")
@@ -805,6 +1017,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "process-ready":
         summary = asyncio.run(process_ready_files_async(args))
+    elif args.command == "replay-unfiled":
+        summary = asyncio.run(replay_unfiled_async(args))
     else:
         summary = migrate_familycloud(args)
     if args.summary_json:

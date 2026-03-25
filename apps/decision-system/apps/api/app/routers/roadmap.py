@@ -19,8 +19,10 @@ from app.services.budget import (
 )
 from app.services.decision_domain import decision_visible_to_actor, resolve_actor_access_context, utc_now
 from app.services.event_bus import publish_event
+from app.services.family_events import make_backend_event_payload
 from app.services.memory import create_document_with_embeddings
 from app.services.ops import record_agent_event
+from agents.common.family_events import make_privacy, publish_event as publish_family_event, snippet_fields
 from agents.common.events.subjects import Subjects
 
 router = APIRouter(prefix="/v1/roadmap", tags=["roadmap"])
@@ -48,6 +50,49 @@ def _latest_score_run(db: Session, decision_id: int) -> DecisionScoreRun | None:
 
 def _budget_person_id(decision: Decision) -> str:
     return str(decision.owner_person_id or decision.target_person_id or decision.created_by_person_id)
+
+
+def _roadmap_payload(item: RoadmapItem, decision: Decision, *, changed_fields: list[str] | None = None) -> dict:
+    payload = {
+        "roadmap_id": item.id,
+        "roadmap_item_id": item.id,
+        "decision_id": item.decision_id,
+        "bucket": item.bucket,
+        "start_date": item.start_date.isoformat() if item.start_date else None,
+        "end_date": item.end_date.isoformat() if item.end_date else None,
+        "status": item.status,
+        "dependency_count": len(item.dependencies_json or []),
+        "dependencies": list(item.dependencies_json or []),
+    }
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    payload.update(snippet_fields("decision_title", decision.title))
+    payload["title"] = payload.get("decision_title_snippet") or f"Roadmap {item.id}"
+    return payload
+
+
+def _emit_roadmap_event(*, item: RoadmapItem, decision: Decision, actor_id: str, actor_person_id: str | None, event_type: str, payload: dict) -> None:
+    event = make_backend_event_payload(
+        family_id=decision.family_id,
+        domain="decision",
+        event_type=event_type,
+        actor_id=actor_id,
+        actor_type="user",
+        actor_person_id=actor_person_id,
+        subject_id=str(item.id),
+        subject_type="roadmap",
+        subject_person_id=_budget_person_id(decision),
+        payload=payload,
+        source_agent_id="DecisionAgent",
+        source_runtime="backend",
+        tags=["roadmap", item.bucket.lower(), str(item.status).lower()],
+        privacy=make_privacy(
+            contains_pii=True,
+            contains_child_data=True,
+            contains_free_text=any(key.endswith("_snippet") for key in payload),
+        ),
+    )
+    publish_family_event(event)
 
 
 @router.get("", response_model=RoadmapListResponse)
@@ -147,6 +192,17 @@ def create_roadmap_item(
     except Exception:
         db.rollback()
     try:
+        _emit_roadmap_event(
+            item=item,
+            decision=decision,
+            actor_id=actor.actor_id,
+            actor_person_id=actor.actor_person_id,
+            event_type="roadmap.created",
+            payload=_roadmap_payload(item, decision),
+        )
+    except Exception:
+        pass
+    try:
         publish_event(
             Subjects.ROADMAP_ITEM_ADDED,
             {"roadmap_item_id": item.id, "decision_id": item.decision_id},
@@ -220,6 +276,17 @@ def update_roadmap_item(
     except Exception:
         db.rollback()
     try:
+        _emit_roadmap_event(
+            item=item,
+            decision=decision,
+            actor_id=actor.actor_id,
+            actor_person_id=actor.actor_person_id,
+            event_type="roadmap.updated",
+            payload=_roadmap_payload(item, decision, changed_fields=["bucket", "start_date", "end_date", "status", "dependencies"]),
+        )
+    except Exception:
+        pass
+    try:
         publish_event(
             Subjects.ROADMAP_ITEM_UPDATED,
             {"roadmap_item_id": item.id, "decision_id": item.decision_id},
@@ -266,6 +333,7 @@ def delete_roadmap_item(
     if not decision_visible_to_actor(decision, actor_person_id=actor.actor_person_id, is_family_admin=actor.is_family_admin):
         raise HTTPException(status_code=403, detail="roadmap item is not visible to this actor")
 
+    deleted_payload = _roadmap_payload(item, decision)
     if item.status != "Done":
         debits = db.execute(
             select(DiscretionaryBudgetLedger).where(
@@ -294,6 +362,17 @@ def delete_roadmap_item(
     db.delete(item)
     decision.updated_at = utc_now()
     db.commit()
+    try:
+        _emit_roadmap_event(
+            item=item,
+            decision=decision,
+            actor_id=actor.actor_id,
+            actor_person_id=actor.actor_person_id,
+            event_type="roadmap.deleted",
+            payload=deleted_payload,
+        )
+    except Exception:
+        pass
     record_agent_event(
         db,
         family_id=decision.family_id,

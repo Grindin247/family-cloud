@@ -51,7 +51,7 @@ from app.services.family_events import make_backend_event_payload
 from app.services.memory import create_document_with_embeddings
 from app.services.ops import record_agent_event
 from app.services.scoring import GoalScoreInput, compute_weighted_score, threshold_outcome
-from agents.common.family_events import publish_event as publish_family_event
+from agents.common.family_events import diff_field_paths, make_privacy, publish_event as publish_family_event, snippet_fields
 
 router = APIRouter(prefix="/v1/decisions", tags=["decisions"])
 logger = logging.getLogger(__name__)
@@ -179,6 +179,73 @@ def _serialize_decision(db: Session, decision: Decision, *, include_scores: bool
     )
 
 
+def _decision_state(decision: Decision) -> dict[str, Any]:
+    return {
+        "scope_type": decision.scope_type.value,
+        "created_by_person_id": str(decision.created_by_person_id),
+        "owner_person_id": str(decision.owner_person_id) if decision.owner_person_id is not None else None,
+        "target_person_id": str(decision.target_person_id) if decision.target_person_id is not None else None,
+        "visibility_scope": decision.visibility_scope.value,
+        "goal_policy": decision.goal_policy.value,
+        "category": decision.category,
+        "title": decision.title,
+        "description": decision.description,
+        "desired_outcome": decision.desired_outcome,
+        "constraints": list(decision.constraints_json or []),
+        "options": list(decision.options_json or []),
+        "cost": decision.cost,
+        "urgency": decision.urgency,
+        "confidence_1_to_5": decision.confidence_1_to_5,
+        "target_date": decision.target_date.isoformat() if decision.target_date else None,
+        "next_review_at": decision.next_review_at.isoformat() if decision.next_review_at else None,
+        "tags": list(decision.tags_json or []),
+        "status": decision.status.value,
+        "notes": decision.notes,
+        "attachments": list(decision.attachments_json or []),
+        "links": list(decision.links_json or []),
+        "context_snapshot": dict(decision.context_snapshot_json or {}),
+        "version": decision.version,
+        "completed_at": decision.completed_at.isoformat() if decision.completed_at else None,
+        "deleted_at": decision.deleted_at.isoformat() if decision.deleted_at else None,
+    }
+
+
+def _decision_payload(decision: Decision, *, changed_fields: list[str] | None = None, extra_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
+        "decision_id": decision.id,
+        "scope_type": decision.scope_type.value,
+        "created_by_person_id": str(decision.created_by_person_id),
+        "owner_person_id": str(decision.owner_person_id) if decision.owner_person_id is not None else None,
+        "target_person_id": str(decision.target_person_id) if decision.target_person_id is not None else None,
+        "visibility_scope": decision.visibility_scope.value,
+        "goal_policy": decision.goal_policy.value,
+        "category": decision.category,
+        "cost": decision.cost,
+        "urgency": decision.urgency,
+        "confidence_1_to_5": decision.confidence_1_to_5,
+        "target_date": decision.target_date.isoformat() if decision.target_date else None,
+        "next_review_at": decision.next_review_at.isoformat() if decision.next_review_at else None,
+        "status": decision.status.value,
+        "version": decision.version,
+        "constraint_count": len(decision.constraints_json or []),
+        "option_count": len(decision.options_json or []),
+        "tag_count": len(decision.tags_json or []),
+        "attachment_count": len(decision.attachments_json or []),
+        "link_count": len(decision.links_json or []),
+        "context_keys": sorted(str(key) for key in (decision.context_snapshot_json or {})),
+    }
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    if extra_payload:
+        payload.update({key: value for key, value in extra_payload.items() if value is not None})
+    payload.update(snippet_fields("title", decision.title))
+    payload.update(snippet_fields("description", decision.description))
+    payload.update(snippet_fields("desired_outcome", decision.desired_outcome))
+    payload.update(snippet_fields("notes", decision.notes))
+    payload["title"] = payload.get("title_snippet") or f"Decision {decision.id}"
+    return payload
+
+
 def _emit_decision_event(
     *,
     decision: Decision,
@@ -202,6 +269,11 @@ def _emit_decision_event(
         source_agent_id="DecisionAgent",
         source_runtime="backend",
         tags=list(decision.tags_json or []),
+        privacy=make_privacy(
+            contains_pii=bool(subject_person_id),
+            contains_child_data=bool(subject_person_id),
+            contains_free_text=any(key.endswith("_snippet") for key in payload),
+        ),
     )
     publish_family_event(event)
 
@@ -463,14 +535,7 @@ def create_decision(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="decision.created",
-            payload={
-                "decision_id": decision.id,
-                "title": decision.title,
-                "scope_type": decision.scope_type.value,
-                "goal_policy": decision.goal_policy.value,
-                "target_person_id": str(decision.target_person_id) if decision.target_person_id is not None else None,
-                "status": decision.status.value,
-            },
+            payload=_decision_payload(decision),
         )
     except Exception:
         logger.exception("Failed to emit decision.created for decision_id=%s", decision.id)
@@ -541,6 +606,7 @@ def update_decision(
         if any(person_id != actor.actor_person_id for person_id in assigned_people):
             raise HTTPException(status_code=403, detail="cross-person decision updates require a family admin")
 
+    before_state = _decision_state(decision)
     changed = False
     next_visibility = normalize_visibility(
         next_scope,
@@ -610,15 +676,7 @@ def update_decision(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="decision.updated",
-            payload={
-                "decision_id": decision.id,
-                "title": decision.title,
-                "scope_type": decision.scope_type.value,
-                "goal_policy": decision.goal_policy.value,
-                "target_person_id": str(decision.target_person_id) if decision.target_person_id is not None else None,
-                "status": decision.status.value,
-                "version": decision.version,
-            },
+            payload=_decision_payload(decision, changed_fields=diff_field_paths(before_state, _decision_state(decision))),
         )
     except Exception:
         logger.exception("Failed to emit decision.updated for decision_id=%s", decision.id)
@@ -666,12 +724,7 @@ def delete_decision(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="decision.deleted",
-            payload={
-                "decision_id": decision.id,
-                "title": decision.title,
-                "scope_type": decision.scope_type.value,
-                "status": decision.status.value,
-            },
+            payload=_decision_payload(decision, changed_fields=["status", "deleted_at", "updated_at"]),
         )
     except Exception:
         logger.exception("Failed to emit decision.deleted for decision_id=%s", decision.id)
@@ -822,19 +875,25 @@ def manual_score_decision(
         logger.exception("Failed to index scored decision rationale for decision_id=%s", decision.id)
         db.rollback()
 
-    score_payload = {
-        "decision_id": decision.id,
-        "title": decision.title,
+    score_payload = _decision_payload(
+        decision,
+        extra_payload={
         "score_type": "goal_alignment",
         "score_value": weighted_1_to_5,
         "threshold_1_to_5": payload.threshold_1_to_5,
         "routed_to": routed_to,
-        "status": decision.status.value,
-        "scope_type": decision.scope_type.value,
-        "goal_policy": decision.goal_policy.value,
-        "target_person_id": str(decision.target_person_id) if decision.target_person_id is not None else None,
         "score_run_id": score_run.id,
-    }
+            "component_count": len(payload.goal_scores),
+            "family_weighted_total_1_to_5": family_weighted_1_to_5,
+            "person_weighted_total_1_to_5": person_weighted_1_to_5,
+            "family_weighted_total_0_to_100": family_weighted_0_to_100,
+            "person_weighted_total_0_to_100": person_weighted_0_to_100,
+            "goal_score_inputs": [
+                {"goal_id": item.goal_id, "score_1_to_5": item.score_1_to_5}
+                for item in payload.goal_scores
+            ],
+        },
+    )
     try:
         _emit_decision_event(
             decision=decision,
@@ -925,12 +984,7 @@ def queue_decision(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="decision.updated",
-            payload={
-                "decision_id": decision.id,
-                "title": decision.title,
-                "status": decision.status.value,
-                "queue_item_id": queue_item.id,
-            },
+            payload=_decision_payload(decision, changed_fields=["status"], extra_payload={"queue_item_id": queue_item.id}),
         )
     except Exception:
         logger.exception("Failed to emit decision.updated(queue) for decision_id=%s", decision.id)
@@ -971,6 +1025,7 @@ def update_status(
     allowed = {item.value: item for item in DecisionStatusEnum}
     if status not in allowed:
         raise HTTPException(status_code=400, detail="invalid status")
+    before_state = _decision_state(decision)
     decision.status = allowed[status]
     decision.updated_at = utc_now()
     if status == DecisionStatusEnum.done.value:
@@ -994,12 +1049,11 @@ def update_status(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type=canonical_event_type,
-            payload={
-                "decision_id": decision.id,
-                "title": decision.title,
-                "previous_status": previous_status,
-                "status": decision.status.value,
-            },
+            payload=_decision_payload(
+                decision,
+                changed_fields=diff_field_paths(before_state, _decision_state(decision)),
+                extra_payload={"previous_status": previous_status},
+            ),
         )
     except Exception:
         logger.exception("Failed to emit %s for decision_id=%s", canonical_event_type, decision.id)

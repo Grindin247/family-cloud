@@ -70,6 +70,7 @@ docker compose --profile agent up -d mcp
 - `get_budget_summary`
 - `get_family_dna`
 - `search_family_memory`
+- `search_documents`
 - `search_notes`
 - `search_files`
 - `list_family_events`
@@ -106,3 +107,4 @@ docker compose --profile agent up -d mcp
 - OpenClaw `decision-agent` should prefer this MCP server over container-local HTTP `exec` patterns for Family Cloud backend access.
 - `tasks-agent` remains direct-to-Vikunja for core task CRUD in phase 1, but can use this MCP server for shared queue, telemetry, playback, metrics, and family-context support.
 - `file-agent` should continue using Nextcloud MCP for file operations and use this MCP server for shared index, queue, telemetry, playback, and metadata support.
+- Caleb and Amelia can use `search_documents`, `search_notes`, and `search_files` directly for read-only recall before escalating to `file-agent`.

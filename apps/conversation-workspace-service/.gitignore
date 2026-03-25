@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+apps/web/node_modules/
+apps/web/.next/

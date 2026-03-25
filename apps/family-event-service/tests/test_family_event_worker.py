@@ -56,3 +56,12 @@ async def test_process_raw_event_dead_letters(monkeypatch):
         assert db.query(FamilyEventDeadLetter).count() == 1
     finally:
         db.close()
+
+
+def test_worker_subscribes_to_all_canonical_subjects():
+    from worker import family_events_worker
+
+    assert "family.events.profile" in family_events_worker.SUBJECTS
+    assert "family.events.planning" in family_events_worker.SUBJECTS
+    assert "family.events.question" in family_events_worker.SUBJECTS
+    assert "family.events.family" in family_events_worker.SUBJECTS

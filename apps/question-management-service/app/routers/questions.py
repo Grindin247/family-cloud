@@ -157,10 +157,11 @@ def purge_family_questions(
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
     internal_admin = _is_internal_admin(x_internal_admin_token)
-    _ensure_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
+    actor = _ensure_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
     deleted = purge_questions(
         db,
         family_id=family_id,
+        actor=actor,
         question_ids=payload.question_ids,
         domain=payload.domain,
         status=payload.status,
@@ -332,10 +333,10 @@ def delete_family_question(
     x_internal_admin_token: str | None = Header(default=None, alias="X-Internal-Admin-Token"),
 ):
     internal_admin = _is_internal_admin(x_internal_admin_token)
-    _ensure_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
+    actor = _ensure_access(family_id=family_id, actor_email=actor_email, internal_admin=internal_admin)
     question = get_question(db, question_id)
     if question is None or question.family_id != family_id:
         raise HTTPException(status_code=404, detail="question not found")
-    delete_question(db, question=question)
+    delete_question(db, question=question, actor=actor)
     db.commit()
     return Response(status_code=204)

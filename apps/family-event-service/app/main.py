@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from app.core.config import settings
+from app.core.db import SessionLocal
 from app.routers import family_events, health, vikunja_integrations
+from app.services.family_events import repair_event_store_sequences
 
 app = FastAPI(
     title="Family Event Service API",
@@ -28,6 +30,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def repair_sequences_on_startup() -> None:
+    db = SessionLocal()
+    try:
+        repair_event_store_sequences(db)
+        db.commit()
+    finally:
+        db.close()
+
 
 app.include_router(health.router)
 app.include_router(family_events.router)

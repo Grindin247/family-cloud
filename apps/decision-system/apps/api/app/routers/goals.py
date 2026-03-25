@@ -21,7 +21,7 @@ from app.services.decision_domain import (
 )
 from app.services.family_events import make_backend_event_payload
 from app.services.ops import record_agent_event
-from agents.common.family_events import publish_event as publish_family_event
+from agents.common.family_events import diff_field_paths, make_privacy, publish_event as publish_family_event, snippet_fields
 
 router = APIRouter(prefix="/v1/goals", tags=["goals"])
 logger = logging.getLogger(__name__)
@@ -54,6 +54,60 @@ def _serialize_goal(goal: Goal) -> GoalResponse:
     )
 
 
+def _goal_state(goal: Goal) -> dict:
+    return {
+        "scope_type": goal.scope_type.value,
+        "owner_person_id": str(goal.owner_person_id) if goal.owner_person_id is not None else None,
+        "visibility_scope": goal.visibility_scope.value,
+        "name": goal.name,
+        "description": goal.description,
+        "weight": goal.weight,
+        "action_types": list(goal.action_types_json or []),
+        "status": goal.status.value,
+        "priority": goal.priority,
+        "horizon": goal.horizon,
+        "target_date": goal.target_date.isoformat() if goal.target_date else None,
+        "success_criteria": goal.success_criteria,
+        "review_cadence_days": goal.review_cadence_days,
+        "next_review_at": goal.next_review_at.isoformat() if goal.next_review_at else None,
+        "tags": list(goal.tags_json or []),
+        "external_refs": list(goal.external_refs_json or []),
+        "goal_revision": goal.goal_revision,
+        "deleted_at": goal.deleted_at.isoformat() if goal.deleted_at else None,
+    }
+
+
+def _goal_payload(goal: Goal, *, changed_fields: list[str] | None = None, extra_payload: dict | None = None) -> dict:
+    payload = {
+        "goal_id": goal.id,
+        "scope_type": goal.scope_type.value,
+        "owner_person_id": str(goal.owner_person_id) if goal.owner_person_id is not None else None,
+        "visibility_scope": goal.visibility_scope.value,
+        "status": goal.status.value,
+        "weight": goal.weight,
+        "priority": goal.priority,
+        "horizon": goal.horizon,
+        "target_date": goal.target_date.isoformat() if goal.target_date else None,
+        "review_cadence_days": goal.review_cadence_days,
+        "next_review_at": goal.next_review_at.isoformat() if goal.next_review_at else None,
+        "goal_revision": goal.goal_revision,
+        "action_types": list(goal.action_types_json or []),
+        "action_type_count": len(goal.action_types_json or []),
+        "tags": list(goal.tags_json or []),
+        "tag_count": len(goal.tags_json or []),
+        "external_ref_count": len(goal.external_refs_json or []),
+    }
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    if extra_payload:
+        payload.update({key: value for key, value in extra_payload.items() if value is not None})
+    payload.update(snippet_fields("name", goal.name))
+    payload.update(snippet_fields("description", goal.description))
+    payload.update(snippet_fields("success_criteria", goal.success_criteria))
+    payload["title"] = payload.get("name_snippet") or f"Goal {goal.id}"
+    return payload
+
+
 def _emit_goal_event(*, goal: Goal, actor_id: str, actor_person_id: str | None, event_type: str, payload: dict) -> None:
     event = make_backend_event_payload(
         family_id=goal.family_id,
@@ -69,6 +123,11 @@ def _emit_goal_event(*, goal: Goal, actor_id: str, actor_person_id: str | None, 
         source_agent_id="DecisionAgent",
         source_runtime="backend",
         tags=list(goal.tags_json or []),
+        privacy=make_privacy(
+            contains_pii=bool(goal.owner_person_id),
+            contains_child_data=bool(goal.owner_person_id),
+            contains_free_text=any(key.endswith("_snippet") for key in payload),
+        ),
     )
     publish_family_event(event)
 
@@ -188,14 +247,7 @@ def create_goal(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="goal.created",
-            payload={
-                "goal_id": goal.id,
-                "name": goal.name,
-                "scope_type": goal.scope_type.value,
-                "status": goal.status.value,
-                "goal_revision": goal.goal_revision,
-                "owner_person_id": str(goal.owner_person_id) if goal.owner_person_id is not None else None,
-            },
+            payload=_goal_payload(goal),
         )
     except Exception:
         logger.exception("Failed to emit goal.created for goal_id=%s", goal.id)
@@ -247,6 +299,7 @@ def update_goal(
     if next_scope == ScopeTypeEnum.person and not actor.is_family_admin and actor.actor_person_id != str(owner.person_id if owner else ""):
         raise HTTPException(status_code=403, detail="personal goals can only be reassigned to yourself unless you are a family admin")
 
+    before_state = _goal_state(goal)
     changed = False
     next_owner = owner.person_id if owner is not None else None
     requested_visibility = payload.visibility_scope if payload.visibility_scope is not None else (None if payload.scope_type is not None else goal.visibility_scope)
@@ -287,14 +340,7 @@ def update_goal(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="goal.updated",
-            payload={
-                "goal_id": goal.id,
-                "name": goal.name,
-                "scope_type": goal.scope_type.value,
-                "status": goal.status.value,
-                "goal_revision": goal.goal_revision,
-                "owner_person_id": str(goal.owner_person_id) if goal.owner_person_id is not None else None,
-            },
+            payload=_goal_payload(goal, changed_fields=diff_field_paths(before_state, _goal_state(goal))),
         )
     except Exception:
         logger.exception("Failed to emit goal.updated for goal_id=%s", goal.id)
@@ -341,13 +387,7 @@ def delete_goal(
             actor_id=actor.actor_id,
             actor_person_id=actor.actor_person_id,
             event_type="goal.deleted",
-            payload={
-                "goal_id": goal.id,
-                "name": goal.name,
-                "scope_type": goal.scope_type.value,
-                "status": goal.status.value,
-                "goal_revision": goal.goal_revision,
-            },
+            payload=_goal_payload(goal, changed_fields=["status", "deleted_at", "updated_at", "goal_revision"]),
         )
     except Exception:
         logger.exception("Failed to emit goal.deleted for goal_id=%s", goal.id)

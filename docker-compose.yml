@@ -239,6 +239,7 @@ services:
       - NEXT_PUBLIC_FAMILY_DOMAIN=${FAMILY_DOMAIN}
       - NEXTCLOUD_BASE_URL=https://nextcloud.${FAMILY_DOMAIN}
       - HOME_PORTAL_DECISION_API_BASE_URL=${HOME_PORTAL_DECISION_API_BASE_URL:-http://decision-api:8000/v1}
+      - HOME_PORTAL_FILE_API_BASE_URL=${HOME_PORTAL_FILE_API_BASE_URL:-http://file-api:8000/v1}
       - HOME_PORTAL_FILE_AGENT_FAMILY_ID=${FILE_AGENT_FAMILY_ID:-2}
       - HOME_PORTAL_FILE_AGENT_ACTOR=${FILE_AGENT_ACTOR:-mrjamescallender@gmail.com}
     command: sh -c "npm run build && npm run start"
@@ -561,6 +562,7 @@ services:
       - FAMILY_EVENT_INTERNAL_ADMIN_TOKEN=${FAMILY_EVENT_INTERNAL_ADMIN_TOKEN:-change-me}
       - QUESTION_API_BASE_URL=${QUESTION_API_BASE_URL:-http://question-api:8000/v1}
       - QUESTION_INTERNAL_ADMIN_TOKEN=${QUESTION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - FILE_API_BASE_URL=${FILE_API_BASE_URL:-http://file-api:8000/v1}
       - DECISION_SELF_API_BASE_URL=${DECISION_SELF_API_BASE_URL:-http://decision-api:8000/v1}
       - TASK_VIKUNJA_URL=${TASK_AGENT_VIKUNJA_URL:-http://vikunja:3456}
       - TASK_VIKUNJA_API_PREFIX=${TASK_AGENT_VIKUNJA_API_PREFIX:-/api/v1}
@@ -585,9 +587,20 @@ services:
       - NEXTCLOUD_MCP_URL=${NEXTCLOUD_MCP_URL:-http://nextcloud-mcp:8000/mcp}
       - FILE_AGENT_NEW_DOC_IDLE_MINUTES=${FILE_AGENT_NEW_DOC_IDLE_MINUTES:-10}
       - FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD=${FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD:-0.70}
+      - HOME=/home/luvwrk777
+      - PATH=/home/luvwrk777/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - OPENCLAW_BIN=/home/luvwrk777/.npm-global/bin/openclaw
+      - OPENCLAW_HOME=/home/luvwrk777/.openclaw
+      - CODEX_HOME=/home/luvwrk777/.codex
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "127.0.0.1:${DECISION_API_PORT:-8011}:8000"
     volumes:
       - ./secrets/vikunja_api_token:/run/secrets/vikunja_api_token:ro
+      - /home/luvwrk777/.openclaw:/home/luvwrk777/.openclaw
+      - /home/luvwrk777/.codex:/home/luvwrk777/.codex
+      - /home/luvwrk777/.npm-global:/home/luvwrk777/.npm-global:ro
+      - /home/luvwrk777/.cache:/home/luvwrk777/.cache
     networks:
       decisionnet:
         aliases: [api]
@@ -855,6 +868,212 @@ services:
       - question-web
     volumes:
       - ./apps/question-management-service/infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      decisionnet: {}
+      familynet: {}
+    dns:
+      - 172.20.0.11
+
+  file-db:
+    profiles: ["decision"]
+    restart: unless-stopped
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${FILE_POSTGRES_DB:-file_management_service}
+      POSTGRES_USER: ${FILE_POSTGRES_USER:-file_user}
+      POSTGRES_PASSWORD: ${FILE_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - file_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FILE_POSTGRES_USER:-file_user} -d ${FILE_POSTGRES_DB:-file_management_service}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      decisionnet:
+        aliases: [file-db]
+      familynet: {}
+
+  file-api:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/file-management-service/Dockerfile
+    depends_on:
+      file-db:
+        condition: service_healthy
+      decision-api:
+        condition: service_started
+      question-api:
+        condition: service_started
+      nats:
+        condition: service_started
+    ports:
+      - "${FILE_API_PORT:-8070}:8000"
+    environment:
+      - APP_ENV=prod
+      - POSTGRES_DB=${FILE_POSTGRES_DB:-file_management_service}
+      - POSTGRES_USER=${FILE_POSTGRES_USER:-file_user}
+      - POSTGRES_PASSWORD=${FILE_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=file-db
+      - POSTGRES_PORT=5432
+      - ROOT_PATH=
+      - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - QUESTION_API_BASE_URL=${QUESTION_API_BASE_URL:-http://question-api:8000/v1}
+      - NEXTCLOUD_MCP_URL=${NEXTCLOUD_MCP_URL:-http://nextcloud-mcp:8000/mcp}
+      - FILE_SELF_API_BASE_URL=http://file-api:8000/v1
+      - FILE_AGENT_NEW_DOC_IDLE_MINUTES=${FILE_AGENT_NEW_DOC_IDLE_MINUTES:-10}
+      - FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD=${FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD:-0.70}
+      - FILE_DISCOVERY_ENABLED=${FILE_DISCOVERY_ENABLED:-true}
+      - FILE_DISCOVERY_FAMILY_IDS=${FILE_DISCOVERY_FAMILY_IDS:-2}
+      - FILE_DISCOVERY_ROOTS=${FILE_DISCOVERY_ROOTS:-/Notes}
+      - FILE_DISCOVERY_SCAN_LIMIT=${FILE_DISCOVERY_SCAN_LIMIT:-1000}
+      - FILE_MEMORY_MIRROR_ENABLED=${FILE_MEMORY_MIRROR_ENABLED:-true}
+      - NATS_URL=nats://nats:4222
+      - NATS_EVENT_STREAM=FAMILY_EVENTS
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    networks:
+      decisionnet: {}
+      familynet: {}
+
+  file-worker:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/file-management-service/Dockerfile
+    depends_on:
+      file-db:
+        condition: service_healthy
+      decision-redis:
+        condition: service_started
+      decision-api:
+        condition: service_started
+      question-api:
+        condition: service_started
+      file-api:
+        condition: service_started
+    environment:
+      - POSTGRES_DB=${FILE_POSTGRES_DB:-file_management_service}
+      - POSTGRES_USER=${FILE_POSTGRES_USER:-file_user}
+      - POSTGRES_PASSWORD=${FILE_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=file-db
+      - POSTGRES_PORT=5432
+      - INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_INTERNAL_ADMIN_TOKEN=${DECISION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - QUESTION_API_BASE_URL=${QUESTION_API_BASE_URL:-http://question-api:8000/v1}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NEXTCLOUD_MCP_URL=${NEXTCLOUD_MCP_URL:-http://nextcloud-mcp:8000/mcp}
+      - FILE_SELF_API_BASE_URL=http://file-api:8000/v1
+      - FILE_AGENT_NEW_DOC_IDLE_MINUTES=${FILE_AGENT_NEW_DOC_IDLE_MINUTES:-10}
+      - FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD=${FILE_AGENT_AUTOFILE_CONFIDENCE_THRESHOLD:-0.70}
+      - FILE_DISCOVERY_ENABLED=${FILE_DISCOVERY_ENABLED:-true}
+      - FILE_DISCOVERY_FAMILY_IDS=${FILE_DISCOVERY_FAMILY_IDS:-2}
+      - FILE_DISCOVERY_ROOTS=${FILE_DISCOVERY_ROOTS:-/Notes}
+      - FILE_DISCOVERY_SCAN_LIMIT=${FILE_DISCOVERY_SCAN_LIMIT:-1000}
+      - FILE_MEMORY_MIRROR_ENABLED=${FILE_MEMORY_MIRROR_ENABLED:-true}
+      - NATS_URL=nats://nats:4222
+      - NATS_EVENT_STREAM=FAMILY_EVENTS
+    command: sh -c "celery -A worker.celery_app worker --beat --loglevel=INFO"
+    networks:
+      decisionnet: {}
+      familynet: {}
+
+  conversation-db:
+    profiles: ["decision"]
+    restart: unless-stopped
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${CONVERSATION_POSTGRES_DB:-conversation_workspace}
+      POSTGRES_USER: ${CONVERSATION_POSTGRES_USER:-conversation_user}
+      POSTGRES_PASSWORD: ${CONVERSATION_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - conversation_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONVERSATION_POSTGRES_USER:-conversation_user} -d ${CONVERSATION_POSTGRES_DB:-conversation_workspace}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      decisionnet:
+        aliases: [conversation-db]
+      familynet: {}
+
+  conversation-api:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/conversation-workspace-service/Dockerfile
+    depends_on:
+      conversation-db:
+        condition: service_healthy
+      decision-api:
+        condition: service_started
+    ports:
+      - "${CONVERSATION_API_PORT:-8060}:8000"
+    environment:
+      - APP_ENV=prod
+      - POSTGRES_DB=${CONVERSATION_POSTGRES_DB:-conversation_workspace}
+      - POSTGRES_USER=${CONVERSATION_POSTGRES_USER:-conversation_user}
+      - POSTGRES_PASSWORD=${CONVERSATION_POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=conversation-db
+      - POSTGRES_PORT=5432
+      - ROOT_PATH=
+      - INTERNAL_ADMIN_TOKEN=${CONVERSATION_INTERNAL_ADMIN_TOKEN:-change-me}
+      - DECISION_API_BASE_URL=http://api:8000/v1
+      - OPENCLAW_DELIVERY_CHANNEL=discord
+      - OPENCLAW_TIMEOUT_SECONDS=180
+      - OPENCLAW_FOLLOWUP_TIMEOUT_SECONDS=180
+      - OPENCLAW_FOLLOWUP_POLL_INTERVAL_SECONDS=1
+      - OPENCLAW_GATEWAY_PROXY_PORT=18789
+      - OPENCLAW_GATEWAY_PROXY_TARGET=host.docker.internal:18789
+      - HOME=/home/luvwrk777
+      - PATH=/home/luvwrk777/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - OPENCLAW_BIN=/home/luvwrk777/.npm-global/bin/openclaw
+      - OPENCLAW_HOME=/home/luvwrk777
+      - CODEX_HOME=/home/luvwrk777/.codex
+      - UPLOADS_DIR=/tmp/conversation-workspace/uploads
+    command: sh -c "socat TCP-LISTEN:${OPENCLAW_GATEWAY_PROXY_PORT:-18789},bind=127.0.0.1,fork,reuseaddr TCP:${OPENCLAW_GATEWAY_PROXY_TARGET:-host.docker.internal:18789} & alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - conversation_uploads:/tmp/conversation-workspace/uploads
+      - /home/luvwrk777/.openclaw:/home/luvwrk777/.openclaw
+      - /home/luvwrk777/.codex:/home/luvwrk777/.codex
+      - /home/luvwrk777/.npm-global:/home/luvwrk777/.npm-global:ro
+      - /home/luvwrk777/.cache:/home/luvwrk777/.cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      decisionnet: {}
+      familynet: {}
+
+  conversation-web:
+    profiles: ["decision"]
+    restart: unless-stopped
+    build:
+      context: ./apps/conversation-workspace-service/apps/web
+    environment:
+      - APP_ENV=prod
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_BASE_URL=/api/v1
+    command: sh -c "npm run build && npm run start"
+    networks:
+      decisionnet: {}
+
+  conversation-nginx:
+    image: nginx:1.27-alpine
+    profiles: ["decision"]
+    restart: unless-stopped
+    depends_on:
+      - conversation-api
+      - conversation-web
+    volumes:
+      - ./apps/conversation-workspace-service/infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       decisionnet: {}
       familynet: {}
@@ -1227,9 +1446,12 @@ volumes:
   nats_data:
   family_event_postgres_data:
   question_postgres_data:
+  file_postgres_data:
+  conversation_postgres_data:
   education_postgres_data:
   profile_postgres_data:
   plan_postgres_data:
+  conversation_uploads:
   # Nextcloud volume name must match the one used in the Nextcloud AIO container.
   nextcloud_aio_mastercontainer:
     external: true

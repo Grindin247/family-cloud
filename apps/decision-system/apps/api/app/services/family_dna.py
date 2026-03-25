@@ -9,9 +9,11 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from agents.common.family_events import make_privacy, publish_event as publish_family_event, snippet_fields
 from agents.common.events.subjects import Subjects
 from agents.common.models.family_dna import FamilyDnaSnapshot as FamilyDnaSnapshotModel
 from app.models.family_dna import FamilyDnaEvent, FamilyDnaPatchProposal, FamilyDnaSnapshot
+from app.services.family_events import make_backend_event_payload
 from app.services.event_bus import publish_event
 from app.services.memory import create_document_with_embeddings
 from app.services.secrets import scan_no_secrets
@@ -126,6 +128,35 @@ def commit_proposal(
             family_id=family_id,
             source="decision-api.family_dna",
         )
+    except Exception:
+        pass
+    try:
+        payload = {
+            "title": f"Family DNA v{next_version}",
+            "version": next_version,
+            "proposal_id": str(proposal_id),
+            "event_id": str(event_id),
+            "patch_op_count": len(proposal.patch_jsonb or []),
+            "source_count": len(proposal.sources_jsonb or []),
+            "confidence": proposal.confidence,
+            "updated_by": actor,
+        }
+        payload.update(snippet_fields("rationale", proposal.rationale))
+        event = make_backend_event_payload(
+            family_id=family_id,
+            domain="decision",
+            event_type="family_dna.updated",
+            actor_id=actor,
+            actor_type="system" if actor == "system" else "user",
+            subject_id=str(family_id),
+            subject_type="family_dna",
+            payload=payload,
+            source_agent_id="DecisionAgent",
+            source_runtime="backend",
+            tags=["family-dna"],
+            privacy=make_privacy(contains_free_text=any(key.endswith("_snippet") for key in payload)),
+        )
+        publish_family_event(event)
     except Exception:
         pass
 

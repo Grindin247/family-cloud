@@ -48,6 +48,25 @@ def test_ingest_invalid_event_goes_to_dead_letter(db_session):
     assert row.event_id == bad["event_id"]
 
 
+def test_ingest_question_purged_summary_event(db_session):
+    event = build_event(
+        family_id=2,
+        domain="question",
+        event_type="question.purged",
+        actor={"actor_type": "system", "actor_id": "system"},
+        subject={"subject_type": "question", "subject_id": "purge:2:test"},
+        payload={"title": "Question backlog purge", "purged_count": 3},
+        source={"agent_id": "QuestionService", "runtime": "backend", "channel": "backfill"},
+        privacy=make_privacy(),
+        occurred_at=datetime(2026, 3, 16, 12, 0, tzinfo=UTC),
+        recorded_at=datetime(2026, 3, 16, 12, 0, tzinfo=UTC),
+    )
+    record = ingest_family_event(db_session, event, subject="family.events.question")
+    db_session.commit()
+    assert record.event_type == "question.purged"
+    assert record.domain == "question"
+
+
 def test_family_events_api_and_analytics(client, db_session):
     decision = _sample_event(family_id=2)
     decision_scored = _sample_event(

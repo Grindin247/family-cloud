@@ -6,10 +6,25 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-AllowedDomain = Literal["decision", "task", "file", "note", "education", "profile", "planning"]
+AllowedDomain = Literal["decision", "task", "file", "note", "education", "profile", "planning", "question", "family"]
 AllowedRuntime = Literal["openclaw-subagent", "openclaw-acp", "backend"]
 AllowedPrivacyClassification = Literal["private", "family", "research", "commercial"]
 AllowedExportPolicy = Literal["never", "restricted", "anonymizable", "exportable"]
+ALLOWED_SOURCE_AGENT_IDS = {
+    "DecisionAgent",
+    "TaskAgent",
+    "FileAgent",
+    "EducationService",
+    "EducationAgent",
+    "ProfileService",
+    "profile-management-service",
+    "PlanningService",
+    "PlanningAgent",
+    "QuestionService",
+    "FamilyService",
+    "Vikunja",
+    "file-management-service",
+}
 
 
 class EventActor(BaseModel):
@@ -83,19 +98,7 @@ class FamilyEvent(BaseModel):
         expected_prefix = f"{self.subject.subject_type}."
         if not self.event_type.startswith(expected_prefix):
             raise ValueError(f"event_type must start with '{expected_prefix}'")
-        if self.source.agent_id not in {
-            "DecisionAgent",
-            "TaskAgent",
-            "FileAgent",
-            "EducationService",
-            "EducationAgent",
-            "ProfileService",
-            "profile-management-service",
-            "PlanningService",
-            "PlanningAgent",
-            "Vikunja",
-        }:
-            raise ValueError(
-                "source.agent_id must be one of DecisionAgent, TaskAgent, FileAgent, EducationService, EducationAgent, ProfileService, profile-management-service, PlanningService, PlanningAgent, or Vikunja"
-            )
+        if self.source.agent_id not in ALLOWED_SOURCE_AGENT_IDS:
+            allowed = ", ".join(sorted(ALLOWED_SOURCE_AGENT_IDS))
+            raise ValueError(f"source.agent_id must be one of {allowed}")
         return self

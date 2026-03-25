@@ -8,7 +8,13 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from agents.common.family_events import build_event, make_privacy, publish_event as publish_family_event
+from agents.common.family_events import (
+    build_event,
+    diff_field_paths,
+    make_privacy,
+    publish_event as publish_family_event,
+    snippet_fields,
+)
 from app.models.profile import ProfileRecord, RelationshipEdge
 from app.schemas.profile import (
     AccountProfileSection,
@@ -63,6 +69,124 @@ def _profile_record(db: Session, *, family_id: int, person_id: UUID) -> ProfileR
             ProfileRecord.person_id == person_id,
         )
     ).scalar_one_or_none()
+
+
+def _profile_snapshot(record: ProfileRecord | None) -> dict[str, Any]:
+    account_profile = dict(record.account_profile_json or _default_account_profile()) if record else _default_account_profile()
+    person_profile = dict(record.person_profile_json or _default_person_profile()) if record else _default_person_profile()
+    preferences = dict(record.preferences_json or _default_preferences()) if record else _default_preferences()
+    return {
+        "account_profile": account_profile,
+        "person_profile": person_profile,
+        "preferences": preferences,
+    }
+
+
+def _profile_state(snapshot: dict[str, Any]) -> dict[str, Any]:
+    account_profile = dict(snapshot.get("account_profile") or {})
+    person_profile = dict(snapshot.get("person_profile") or {})
+    preferences = dict(snapshot.get("preferences") or {})
+    learning_preferences = dict(preferences.get("learning_preferences") or {})
+    dietary_preferences = dict(preferences.get("dietary_preferences") or {})
+    accessibility_needs = dict(preferences.get("accessibility_needs") or {})
+    motivation_style = dict(preferences.get("motivation_style") or {})
+    communication_preferences = dict(preferences.get("communication_preferences") or {})
+    return {
+        "account_profile": {
+            "primary_login_present": bool(account_profile.get("primary_login")),
+            "auth_providers": list(account_profile.get("auth_providers") or []),
+            "auth_methods": list(account_profile.get("auth_methods") or []),
+            "mfa_enabled": bool(account_profile.get("mfa_enabled")),
+            "passkeys_enabled": bool(account_profile.get("passkeys_enabled")),
+            "passkey_label_count": len(account_profile.get("passkey_labels") or []),
+            "recovery_methods": list(account_profile.get("recovery_methods") or []),
+            "recovery_contact_count": len(account_profile.get("recovery_contacts") or []),
+            "legal_consent_keys": [item.get("consent_key") for item in account_profile.get("legal_consents") or [] if isinstance(item, dict)],
+            "last_reviewed_at": account_profile.get("last_reviewed_at"),
+        },
+        "person_profile": {
+            "birthdate_present": bool(person_profile.get("birthdate")),
+            "pronouns": person_profile.get("pronouns"),
+            "timezone": person_profile.get("timezone"),
+            "locale": person_profile.get("locale"),
+            "languages": list(person_profile.get("languages") or []),
+            "role_tags": list(person_profile.get("role_tags") or []),
+            "traits": list(person_profile.get("traits") or []),
+        },
+        "preferences": {
+            "hobbies": list(preferences.get("hobbies") or []),
+            "interests": list(preferences.get("interests") or []),
+            "learning_preferences": {
+                "modalities": list(learning_preferences.get("modalities") or []),
+                "pace": learning_preferences.get("pace"),
+                "environments": list(learning_preferences.get("environments") or []),
+                "supports": list(learning_preferences.get("supports") or []),
+            },
+            "dietary_preferences": {
+                "restrictions": list(dietary_preferences.get("restrictions") or []),
+                "allergies": list(dietary_preferences.get("allergies") or []),
+                "likes": list(dietary_preferences.get("likes") or []),
+                "dislikes": list(dietary_preferences.get("dislikes") or []),
+            },
+            "accessibility_needs": {
+                "accommodations": list(accessibility_needs.get("accommodations") or []),
+                "assistive_tools": list(accessibility_needs.get("assistive_tools") or []),
+                "sensory_considerations": list(accessibility_needs.get("sensory_considerations") or []),
+                "mobility_considerations": list(accessibility_needs.get("mobility_considerations") or []),
+            },
+            "motivation_style": {
+                "encouragements": list(motivation_style.get("encouragements") or []),
+                "rewards": list(motivation_style.get("rewards") or []),
+                "triggers_to_avoid": list(motivation_style.get("triggers_to_avoid") or []),
+                "routines": list(motivation_style.get("routines") or []),
+            },
+            "communication_preferences": {
+                "preferred_channels": list(communication_preferences.get("preferred_channels") or []),
+                "response_style": communication_preferences.get("response_style"),
+                "cadence": communication_preferences.get("cadence"),
+                "boundaries": list(communication_preferences.get("boundaries") or []),
+            },
+        },
+    }
+
+
+def _profile_snippet_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    account_profile = dict(snapshot.get("account_profile") or {})
+    person_profile = dict(snapshot.get("person_profile") or {})
+    preferences = dict(snapshot.get("preferences") or {})
+    payload: dict[str, Any] = {}
+    payload.update(snippet_fields("security_notes", account_profile.get("security_notes")))
+    payload.update(snippet_fields("demographic_notes", person_profile.get("demographic_notes")))
+    payload.update(snippet_fields("learning_notes", (preferences.get("learning_preferences") or {}).get("notes")))
+    payload.update(snippet_fields("dietary_notes", (preferences.get("dietary_preferences") or {}).get("notes")))
+    payload.update(snippet_fields("accessibility_notes", (preferences.get("accessibility_needs") or {}).get("notes")))
+    payload.update(snippet_fields("motivation_notes", (preferences.get("motivation_style") or {}).get("notes")))
+    payload.update(snippet_fields("communication_notes", (preferences.get("communication_preferences") or {}).get("notes")))
+    return payload
+
+
+def _relationship_state(row: RelationshipEdge | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(row, dict):
+        metadata = dict(row.get("metadata") or {})
+        return {
+            "source_person_id": row.get("source_person_id"),
+            "target_person_id": row.get("target_person_id"),
+            "relationship_type": row.get("relationship_type"),
+            "status": row.get("status"),
+            "is_mutual": bool(row.get("is_mutual")),
+            "metadata_keys": sorted(str(key) for key in metadata),
+            "notes": row.get("notes"),
+        }
+    metadata = dict(row.metadata_json or {})
+    return {
+        "source_person_id": str(row.source_person_id),
+        "target_person_id": str(row.target_person_id),
+        "relationship_type": row.relationship_type,
+        "status": row.status,
+        "is_mutual": row.is_mutual,
+        "metadata_keys": sorted(str(key) for key in metadata),
+        "notes": row.notes,
+    }
 
 
 def list_relationship_edges(db: Session, *, family_id: int, person_id: UUID | None = None) -> list[dict[str, Any]]:
@@ -157,6 +281,7 @@ def create_or_update_profile_record(
     person: dict[str, Any],
 ) -> ProfileRecord:
     record = _profile_record(db, family_id=family_id, person_id=person_id)
+    before_snapshot = _profile_snapshot(record)
     now = utcnow()
     if record is None:
         record = ProfileRecord(
@@ -177,6 +302,11 @@ def create_or_update_profile_record(
 
     db.commit()
     db.refresh(record)
+    after_snapshot = _profile_snapshot(record)
+    changed_fields = diff_field_paths(before_snapshot, after_snapshot)
+    role_tags = list((after_snapshot.get("person_profile") or {}).get("role_tags") or [])
+    interests = list((after_snapshot.get("preferences") or {}).get("interests") or [])
+    hobbies = list((after_snapshot.get("preferences") or {}).get("hobbies") or [])
     _publish_profile_event(
         family_id=family_id,
         event_type="profile.person.updated",
@@ -188,10 +318,18 @@ def create_or_update_profile_record(
         payload={
             "title": str(person.get("display_name") or person.get("canonical_name") or person_id),
             "person_id": str(person_id),
-            "sections_updated": ["account_profile", "person_profile", "preferences"],
-            "role_tags": payload.person_profile.role_tags,
-            "interests": payload.preferences.interests,
-            "hobbies": payload.preferences.hobbies,
+            "sections_updated": sorted({item.split(".", 1)[0] for item in changed_fields}),
+            "changed_fields": changed_fields,
+            "role_tags": role_tags,
+            "role_tag_count": len(role_tags),
+            "interests": interests,
+            "interest_count": len(interests),
+            "hobbies": hobbies,
+            "hobby_count": len(hobbies),
+            "status": str(person.get("status") or "active"),
+            "role_in_family": person.get("role_in_family"),
+            "after": _profile_state(after_snapshot),
+            **_profile_snippet_payload(after_snapshot),
         },
         tags=["profile", "profile-update"],
     )
@@ -226,6 +364,7 @@ def create_relationship_edge(
     db.add(row)
     db.commit()
     db.refresh(row)
+    relationship_state = _relationship_state(row)
     _publish_profile_event(
         family_id=family_id,
         event_type="profile.relationship.created",
@@ -238,10 +377,21 @@ def create_relationship_edge(
             "title": f"{source_person.get('display_name') or row.source_person_id} -> {target_person.get('display_name') or row.target_person_id}",
             "relationship_id": str(row.relationship_id),
             "source_person_id": str(row.source_person_id),
+            "source_display_name": source_person.get("display_name"),
             "target_person_id": str(row.target_person_id),
+            "target_display_name": target_person.get("display_name"),
+            "relationship_direction": "source_to_target",
             "relationship_type": row.relationship_type,
             "is_mutual": row.is_mutual,
             "status": row.status,
+            "metadata_keys": relationship_state["metadata_keys"],
+            "after": {
+                "relationship_type": relationship_state["relationship_type"],
+                "status": relationship_state["status"],
+                "is_mutual": relationship_state["is_mutual"],
+                "metadata_keys": relationship_state["metadata_keys"],
+            },
+            **snippet_fields("relationship_notes", row.notes),
         },
         tags=["profile", "relationship"],
     )
@@ -259,6 +409,7 @@ def update_relationship_edge(
     source_person: dict[str, Any],
     target_person: dict[str, Any],
 ) -> dict[str, Any]:
+    before_state = _relationship_state(row)
     if payload.source_person_id is not None:
         row.source_person_id = UUID(payload.source_person_id)
     if payload.target_person_id is not None:
@@ -278,6 +429,7 @@ def update_relationship_edge(
     row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
+    after_state = _relationship_state(row)
     _publish_profile_event(
         family_id=row.family_id,
         event_type="profile.relationship.updated",
@@ -290,10 +442,22 @@ def update_relationship_edge(
             "title": f"{source_person.get('display_name') or row.source_person_id} -> {target_person.get('display_name') or row.target_person_id}",
             "relationship_id": str(row.relationship_id),
             "source_person_id": str(row.source_person_id),
+            "source_display_name": source_person.get("display_name"),
             "target_person_id": str(row.target_person_id),
+            "target_display_name": target_person.get("display_name"),
+            "relationship_direction": "source_to_target",
             "relationship_type": row.relationship_type,
             "is_mutual": row.is_mutual,
             "status": row.status,
+            "metadata_keys": after_state["metadata_keys"],
+            "changed_fields": diff_field_paths(before_state, after_state),
+            "after": {
+                "relationship_type": after_state["relationship_type"],
+                "status": after_state["status"],
+                "is_mutual": after_state["is_mutual"],
+                "metadata_keys": after_state["metadata_keys"],
+            },
+            **snippet_fields("relationship_notes", row.notes),
         },
         tags=["profile", "relationship"],
     )
@@ -310,14 +474,20 @@ def delete_relationship_edge(
     source_person: dict[str, Any],
     target_person: dict[str, Any],
 ) -> None:
+    relationship_state = _relationship_state(row)
     event_payload = {
         "title": f"{source_person.get('display_name') or row.source_person_id} -> {target_person.get('display_name') or row.target_person_id}",
         "relationship_id": str(row.relationship_id),
         "source_person_id": str(row.source_person_id),
+        "source_display_name": source_person.get("display_name"),
         "target_person_id": str(row.target_person_id),
+        "target_display_name": target_person.get("display_name"),
+        "relationship_direction": "source_to_target",
         "relationship_type": row.relationship_type,
         "is_mutual": row.is_mutual,
         "status": row.status,
+        "metadata_keys": relationship_state["metadata_keys"],
+        **snippet_fields("relationship_notes", row.notes),
     }
     db.delete(row)
     db.commit()
@@ -347,6 +517,7 @@ def _publish_profile_event(
     tags: list[str],
 ) -> None:
     try:
+        contains_free_text = any(key.endswith("_snippet") for key in payload)
         event = build_event(
             family_id=family_id,
             domain="profile",
@@ -354,8 +525,12 @@ def _publish_profile_event(
             actor={"actor_type": actor_type, "actor_id": actor_id, "person_id": actor_person_id},
             subject={"subject_type": "profile", "subject_id": subject_id, "person_id": subject_person_id},
             payload=payload,
-            source={"agent_id": "profile-management-service", "runtime": "backend"},
-            privacy=make_privacy(),
+            source={"agent_id": "ProfileService", "runtime": "backend"},
+            privacy=make_privacy(
+                contains_pii=True,
+                contains_child_data=bool(subject_person_id),
+                contains_free_text=contains_free_text,
+            ),
             tags=tags,
         )
         publish_family_event(event)

@@ -2,7 +2,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agents.common.family_events import build_event, make_privacy, subject_for_domain, validate_event_envelope
+from agents.common.family_events import (
+    build_event,
+    canonical_subjects,
+    diff_field_paths,
+    make_privacy,
+    snippet_fields,
+    subject_for_domain,
+    validate_event_envelope,
+)
 
 
 def test_build_event_normalizes_and_validates():
@@ -28,6 +36,18 @@ def test_subject_for_domain():
     assert subject_for_domain("note") == "family.events.file"
     assert subject_for_domain("education") == "family.events.education"
     assert subject_for_domain("planning") == "family.events.planning"
+    assert subject_for_domain("question") == "family.events.question"
+    assert subject_for_domain("family") == "family.events.family"
+    assert canonical_subjects() == [
+        "family.events.decision",
+        "family.events.education",
+        "family.events.family",
+        "family.events.file",
+        "family.events.planning",
+        "family.events.profile",
+        "family.events.question",
+        "family.events.task",
+    ]
 
 
 def test_education_service_agent_id_allowed():
@@ -62,6 +82,46 @@ def test_planning_service_agent_id_allowed():
     )
     validate_event_envelope(event)
     assert event["domain"] == "planning"
+
+
+def test_question_and_family_service_agent_ids_allowed():
+    question = build_event(
+        family_id=2,
+        domain="question",
+        event_type="question.created",
+        actor={"actor_type": "user", "actor_id": "admin@example.com"},
+        subject={"subject_type": "question", "subject_id": "question-1"},
+        payload={"question_id": "question-1"},
+        source={"agent_id": "QuestionService", "runtime": "backend"},
+        privacy=make_privacy(contains_free_text=True),
+        occurred_at=datetime(2026, 3, 23, 12, 0, tzinfo=UTC),
+        recorded_at=datetime(2026, 3, 23, 12, 1, tzinfo=UTC),
+    )
+    family = build_event(
+        family_id=2,
+        domain="family",
+        event_type="family_feature.updated",
+        actor={"actor_type": "user", "actor_id": "admin@example.com"},
+        subject={"subject_type": "family_feature", "subject_id": "family-2:planning"},
+        payload={"feature_key": "planning"},
+        source={"agent_id": "FamilyService", "runtime": "backend"},
+        privacy=make_privacy(),
+        occurred_at=datetime(2026, 3, 23, 12, 0, tzinfo=UTC),
+        recorded_at=datetime(2026, 3, 23, 12, 1, tzinfo=UTC),
+    )
+    validate_event_envelope(question)
+    validate_event_envelope(family)
+
+
+def test_payload_snippet_and_diff_helpers():
+    assert snippet_fields("prompt", "  This is a long enough prompt.  ") == {
+        "prompt_snippet": "This is a long enough prompt.",
+        "prompt_char_count": 29,
+    }
+    assert diff_field_paths(
+        {"status": "draft", "nested": {"pace": "slow"}},
+        {"status": "active", "nested": {"pace": "steady"}},
+    ) == ["nested.pace", "status"]
 
 
 def test_invalid_agent_id_rejected():

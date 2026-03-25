@@ -5,7 +5,8 @@ from .builder import (
     new_event_id,
     validate_event_envelope,
 )
-from .subjects import subject_for_domain
+from .payloads import diff_field_paths, snippet_fields, text_snippet
+from .subjects import canonical_subjects, subject_for_domain
 
 
 def emit_canonical_event(*args, **kwargs):
@@ -26,6 +27,10 @@ __all__ = [
     "new_correlation_id",
     "new_event_id",
     "publish_event",
+    "canonical_subjects",
+    "diff_field_paths",
+    "snippet_fields",
     "subject_for_domain",
+    "text_snippet",
     "validate_event_envelope",
 ]

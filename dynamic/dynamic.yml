@@ -143,6 +143,19 @@ http:
       service: planning
       tls: {}
 
+    chat-http:
+      rule: "Host(`chat.family.callender`)"
+      entryPoints: [web]
+      middlewares: [redirect-to-https]
+      service: chat
+
+    chat:
+      rule: "Host(`chat.family.callender`)"
+      entryPoints: [websecure]
+      middlewares: [auth]
+      service: chat
+      tls: {}
+
     # Allow Vikunja API without forward-auth (Vikunja uses its own JWT)
     tasks-api-http:
       rule: "Host(`tasks.family.callender`) && PathPrefix(`/api`)"
@@ -236,6 +249,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://plan-nginx:80"
+
+    chat:
+      loadBalancer:
+        servers:
+          - url: "http://conversation-nginx:80"
 
   serversTransports:
     insecure-transport:

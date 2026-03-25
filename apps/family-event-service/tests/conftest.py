@@ -7,6 +7,9 @@ os.environ["APP_ENV"] = "test"
 APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +42,8 @@ app.dependency_overrides[get_db] = override_get_db
 def reset_db(monkeypatch):
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr("app.main.SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.main.repair_event_store_sequences", lambda db: None)
     monkeypatch.setattr("app.services.decision_api.ensure_family_access", lambda **kwargs: None)
     monkeypatch.setattr("app.services.decision_api.ensure_family_events_enabled", lambda **kwargs: None)
     monkeypatch.setattr("app.routers.family_events.ensure_family_access", lambda **kwargs: None)
